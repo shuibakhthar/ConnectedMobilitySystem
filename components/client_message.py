@@ -4,7 +4,7 @@ CLIENT_TYPES = ["Ambulance", "Car", "TrafficLight", "Hospital"]
 CLIENT_STATUS = {
     "AllClients": ["register", "location_update", "heartbeat"],
     "Ambulance": ["report_crash", "answer_call", "arrived_at_scene", "transporting_patient", "at_hospital", "available"],
-    "Car": ["register_crash"],
+    "Car": ["report_crash"],
     "TrafficLight": ["light_green", "light_yellow", "light_red"],
     "Hospital": ["open", "closed", "occupancy_update"]
 }
