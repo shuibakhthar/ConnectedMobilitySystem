@@ -1,16 +1,9 @@
 import json
-SERVER_STATUS = [
-    "ack_register", "ack_crash", "ack_location_update",
-    "ack_answer_call", "ack_arrived_at_scene", "ack_transporting_patient", "ack_at_hospital", "ack_available",
-    "ack_light_green", "ack_light_yellow", "ack_light_red",
-    "ack_open", "ack_closed", "ack_occupancy_update",
-    "dispose_crash"]
-NEEDED_PAYLOADS = {
-    "dispose_crash": ["crash_id", "car_client_id"]
-}
+from config.settings import SERVER_STATUS, NEEDED_PAYLOADS
 
 class ServerMessage:
-    def __init__(self, server_id, status, payload):
+    def __init__(self, server_id, status, payload, server_zone=None):
+        self.server_zone = server_zone
         self.server_id = server_id
 
         #Server status validation

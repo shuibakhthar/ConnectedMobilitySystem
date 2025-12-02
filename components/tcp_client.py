@@ -1,13 +1,16 @@
 import asyncio
 from components.client_message import ClientMessage
 from components.server_message import deserialize_server_message
+import logging
 
 class TCPClient:
-    def __init__(self, server_host, server_port, client_id, client_type="Car"):
+    def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
         self.server_host = server_host
         self.server_port = server_port
         self.client_id = client_id
         self.client_type = client_type
+        self.heartbeat_interval = heartbeat_interval
+        self.log = logging.getLogger(f"TCPClient[{client_id}]")
 
     async def connect(self):
         self.reader, self.writer = await asyncio.open_connection(self.server_host, self.server_port)
@@ -20,13 +23,15 @@ class TCPClient:
         await self.writer.drain()
         response = await self.reader.readline()
         resp_msg = deserialize_server_message(response.decode())
-        print(f"Registration response: {resp_msg.serialize()}")
+        self.log.info(f"Registration response: {resp_msg.serialize() if resp_msg else 'None'}")
+        # print(f"Registration response: {resp_msg.serialize()}")
 
     async def send_heartbeat(self):
         heartbeat_msg = ClientMessage(self.client_id, self.client_type, "heartbeat", {})
         self.writer.write(heartbeat_msg.serialize())
         await self.writer.drain()
-        print("Heartbeat sent.")
+        self.log.debug("Heartbeat sent.")
+        # print("Heartbeat sent.")
 
     #async def send_status(self, status):
     #    msg = serialize_message("status_update", self.client_id, status)
@@ -40,7 +45,8 @@ class TCPClient:
                 if not data:
                     break
                 msg = deserialize_server_message(data.decode())
-                print(f"Received from server: {msg}")
+                self.log.info(f"Received from server: {msg.serialize() if msg else 'None'}")
+                # print(f"Received from server: {msg}")
         except asyncio.CancelledError:
             pass
 
@@ -53,7 +59,8 @@ class TCPClient:
                 await self.send_heartbeat()
                 await asyncio.sleep(15)
         except KeyboardInterrupt:
-            print("Client shutting down")
+            self.log.info("Client shutting down")
+            # print("Client shutting down")
         finally:
             listener_task.cancel()
             self.writer.close()

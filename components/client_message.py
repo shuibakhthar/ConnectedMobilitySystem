@@ -1,22 +1,5 @@
 import json
-
-CLIENT_TYPES = ["Ambulance", "Car", "TrafficLight", "Hospital"]
-CLIENT_STATUS = {
-    "AllClients": ["register", "location_update", "heartbeat"],
-    "Ambulance": ["report_crash", "answer_call", "arrived_at_scene", "transporting_patient", "at_hospital", "available"],
-    "Car": ["report_crash"],
-    "TrafficLight": ["light_green", "light_yellow", "light_red"],
-    "Hospital": ["open", "closed", "occupancy_update"]
-}
-NEEDED_PAYLOADS = {
-    "location_update": ["latitude", "longitude"],
-    "report_crash": ["latitude", "longitude"],
-    "answer_call": ["call_id"],
-    "arrived_at_scene": ["call_id"],
-    "transporting_patient": ["call_id", "hospital_id"],
-    "at_hospital": ["call_id", "hospital_id"],
-    "occupancy_update": ["current_occupancy", "max_capacity"]
-}
+from config.settings import CLIENT_TYPES, CLIENT_STATUS, NEEDED_PAYLOADS
 
 class ClientMessage:
     def __init__(self, client_id, client_type, status, payload):
