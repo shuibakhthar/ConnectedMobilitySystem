@@ -23,7 +23,8 @@ class ServerMessage:
         message = {
             "server_id": self.server_id,
             "status": self.status,
-            "payload": self.payload
+            "payload": self.payload,
+            "zone": self.server_zone
         }
         return (json.dumps(message) + "\n").encode('utf-8')
     
@@ -34,7 +35,8 @@ def deserialize_server_message(data):
         server_id = message.get("server_id")
         status = message.get("status")
         payload = message.get("payload", {})
-        return ServerMessage(server_id, status, payload)
+        server_zone = message.get("zone")
+        return ServerMessage(server_id, status, payload, server_zone)
     except (json.JSONDecodeError, ValueError) as e:
         print(f"Failed to deserialize message: {e}")
         return None

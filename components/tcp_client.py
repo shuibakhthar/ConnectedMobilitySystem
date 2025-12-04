@@ -4,11 +4,12 @@ from components.server_message import deserialize_server_message
 import logging
 
 class TCPClient:
-    def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
+    def __init__(self, server_host, server_port, client_id, client_type="Car", zone=None, heartbeat_interval=15):
         self.server_host = server_host
         self.server_port = server_port
         self.client_id = client_id
         self.client_type = client_type
+        self.zone = zone
         self.heartbeat_interval = heartbeat_interval
         self.log = logging.getLogger(f"TCPClient[{client_id}]")
 
@@ -17,17 +18,26 @@ class TCPClient:
         await self.register()
 
     async def register(self):
-        reg_msg = ClientMessage(self.client_id, self.client_type, "register", {})
+        reg_msg = ClientMessage(self.client_id, self.client_type, "register", {}, self.zone)
         #reg_msg = serialize_message("register", self.client_id, {"info": "Client registration"})
         self.writer.write(reg_msg.serialize())
         await self.writer.drain()
         response = await self.reader.readline()
         resp_msg = deserialize_server_message(response.decode())
-        self.log.info(f"Registration response: {resp_msg.serialize() if resp_msg else 'None'}")
+        
+        # Check if registration was successful (zone validation)
+        if resp_msg and resp_msg.status == "ack_register":
+            if resp_msg.payload.get("status") == "zone_mismatch":
+                self.log.error(f"Registration failed: Zone mismatch. Client zone: {self.zone}, Server zone: {resp_msg.server_zone}")
+                raise ConnectionError(f"Zone mismatch: Client in zone {self.zone}, but server is in zone {resp_msg.server_zone}")
+            elif resp_msg.payload.get("status") == "ok":
+                self.log.info(f"Registration successful in zone {self.zone}")
+            else:
+                self.log.info(f"Registration response: {resp_msg.serialize() if resp_msg else 'None'}")
         # print(f"Registration response: {resp_msg.serialize()}")
 
     async def send_heartbeat(self):
-        heartbeat_msg = ClientMessage(self.client_id, self.client_type, "heartbeat", {})
+        heartbeat_msg = ClientMessage(self.client_id, self.client_type, "heartbeat", {}, self.zone)
         self.writer.write(heartbeat_msg.serialize())
         await self.writer.drain()
         self.log.debug("Heartbeat sent.")
@@ -68,5 +78,5 @@ class TCPClient:
 
 # For manual test, run this code:
 if __name__ == "__main__":
-    client = TCPClient('127.0.0.1', 8888, client_id="ambulance_1", client_type="Ambulance")
+    client = TCPClient('127.0.0.1', 8888, client_id="ambulance_1", client_type="Ambulance", zone="A")
     asyncio.run(client.run())

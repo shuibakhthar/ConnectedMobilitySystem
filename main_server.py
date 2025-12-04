@@ -4,7 +4,7 @@ from discovery.discovery_protocol import BeaconServer
 from config.settings import MAIN_SERVER_LOGGER
 import argparse
 '''
-python main_server.py --host=127.0.0.1 --tcp_port=8888 --beacon_port=9999
+python main_server.py --host=127.0.0.1 --tcp_port=8888 --beacon_port=9999 --zone=A
 '''
 
 def parse_args():
@@ -12,6 +12,7 @@ def parse_args():
     p.add_argument('--host', type=str, default='127.0.0.1')
     p.add_argument('--tcp_port', type=int, default=8888)
     p.add_argument('--beacon_port', type=int, default=9999)
+    p.add_argument('--zone', type=str, default='A')
     return p.parse_args()
 
 async def main():
@@ -21,8 +22,8 @@ async def main():
 
     args = parse_args()
 
-    server = TCPServer(args.host, args.tcp_port)
-    beacon = BeaconServer(args.host, args.tcp_port)
+    server = TCPServer(args.host, args.tcp_port ,args.zone)
+    beacon = BeaconServer(args.host, args.tcp_port, args.zone)
 
     MAIN_SERVER_LOGGER.info(f"Starting Main Server on {args.host}:{args.tcp_port} with Beacon on port {args.beacon_port}") 
 

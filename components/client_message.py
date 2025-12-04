@@ -2,8 +2,9 @@ import json
 from config.settings import CLIENT_TYPES, CLIENT_STATUS, NEEDED_PAYLOADS
 
 class ClientMessage:
-    def __init__(self, client_id, client_type, status, payload):
+    def __init__(self, client_id, client_type, status, payload, zone=None):
         self.client_id = client_id
+        self.zone = zone
 
         #Client type validation
         if client_type not in CLIENT_TYPES:
@@ -28,11 +29,11 @@ class ClientMessage:
             "client_id": self.client_id,
             "client_type": self.client_type,
             "status": self.status,
-            "payload": self.payload
+            "payload": self.payload,
+            "zone": self.zone
         }
         return (json.dumps(message) + "\n").encode('utf-8')
     
-
 def deserialize_client_message(data):
     try:
         message = json.loads(data)
@@ -40,7 +41,8 @@ def deserialize_client_message(data):
         client_type = message.get("client_type")
         status = message.get("status")
         payload = message.get("payload", {})
-        return ClientMessage(client_id, client_type, status, payload)
+        zone = message.get("zone")
+        return ClientMessage(client_id, client_type, status, payload, zone)
     except (json.JSONDecodeError, ValueError) as e:
         print(f"Failed to deserialize message: {e}")
         return None

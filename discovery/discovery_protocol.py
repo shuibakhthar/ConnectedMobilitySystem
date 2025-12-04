@@ -4,11 +4,11 @@ from config.settings import BEACON_INTERVAL, BEACON_PORT, DISCOVERY_LOGGER
 import json
 
 class BeaconServer:
-    def __init__(self, server_host, server_port, zone=None, server_id=None, ctrl_port=None):
+    def __init__(self, server_host, server_port, beacon_zone=None, server_id=None, ctrl_port=None):
         self.server_host = server_host  # IP addr of TCP server to advertise
         self.server_port = server_port
 
-        self.zone = zone
+        self.beacon_zone = beacon_zone
         self.server_id = server_id
         self.ctrl_port = ctrl_port
 
@@ -18,23 +18,18 @@ class BeaconServer:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.setblocking(False)
 
-        # Build message: include server metadata if provided
-        if self.zone and self.server_id and self.ctrl_port:
-            message = json.dumps({
-                "type": "server_beacon",
-                "client_addr": f"{self.server_host}:{self.server_port}",  # for clients
-                "zone": self.zone,
-                "server_id": self.server_id,
-                "host": self.server_host,
-                "tcp_port": self.server_port,
-                "ctrl_port": self.ctrl_port
-            }).encode('utf-8')
-        else:
-            # Legacy client-only beacon
-            message = f"{self.server_host}:{self.server_port}".encode('utf-8')
+        # Build message with zone info
+        message = json.dumps({
+            "type": "server_beacon",
+            "client_addr": f"{self.server_host}:{self.server_port}",
+            "host": self.server_host,
+            "tcp_port": self.server_port,
+            "zone": self.beacon_zone,
+            "server_id": self.server_id,
+            "ctrl_port": self.ctrl_port
+        }).encode('utf-8')
 
-        # message = f"{self.server_host}:{self.server_port}".encode('utf-8')
-        broadcast_addr = ('255.255.255.255', BEACON_PORT)  # Global broadcast
+        broadcast_addr = ('255.255.255.255', BEACON_PORT)
 
         while True:
             try:
@@ -56,14 +51,31 @@ class BeaconListener(asyncio.DatagramProtocol):
         self.on_client_discovered = None  # callback function
 
     def datagram_received(self, data, addr):
-        server_info = data.decode('utf-8')
-        # Debug print to verify packet reception
-        DISCOVERY_LOGGER.debug(f"Beacon received from {addr}: {server_info}")
-        # print(f"Beacon received from {addr}: {server_info}")
-        if server_info not in self.discovered_servers:
-            self.discovered_servers.add(server_info)
-            if self.on_server_discovered:
-                self.on_server_discovered(server_info)
+        try:
+            raw = data.decode('utf-8')
+            # Debug print to verify packet reception
+            DISCOVERY_LOGGER.debug(f"Beacon received from {addr}: {raw}")
+            # Try parsing as JSON (new format with zone)
+            try:
+                msg = json.loads(raw)
+                if msg.get("type") == "server_beacon":
+                    server_info = raw  # Pass the full JSON string
+                    if server_info not in self.discovered_servers:
+                        self.discovered_servers.add(server_info)
+                        if self.on_server_discovered:
+                            self.on_server_discovered(server_info, msg)  # Pass JSON string and parsed msg
+                        return
+            except json.JSONDecodeError:
+                pass
+            
+            # Legacy format: "host:port"
+            server_info = raw
+            if server_info not in self.discovered_servers:
+                self.discovered_servers.add(server_info)
+                if self.on_server_discovered:
+                    self.on_server_discovered(server_info, None)  # No zone info for legacy
+        except Exception as e:
+            DISCOVERY_LOGGER.error(f"Error processing beacon: {e}")
 
     # def datagram_received(self, data, addr):
     #     try:

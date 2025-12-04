@@ -6,11 +6,12 @@ import logging
 from datetime import datetime, timedelta
 
 class TCPServer:
-    def __init__(self, host, port, heartbeat_timeout=30):
+    def __init__(self, host, port, zone, heartbeat_timeout=30):
         self.host = host
         self.port = port
+        self.zone = zone
         self.heartbeat_timeout = timedelta(seconds=heartbeat_timeout)
-        self.clients = {}  # sender_id -> (reader, writer, client_type, status, last_heartbeat)
+        self.clients = {}  # sender_id -> (reader, writer, client_type, status, last_heartbeat, client_zone)
         self.writer_to_client = {}  # writer -> sender_id
         self.log = logging.getLogger(f"TCPServer[{host}:{port}]")
 
@@ -84,10 +85,11 @@ class TCPServer:
             client_id = msg.client_id
             status_msg = msg.status
             payload = msg.payload
+            client_zone = msg.zone
 
             #register client if not already registered
             if status_msg == "register":
-                await self.handle_register_client(client_id, client_type, writer)
+                await self.handle_register_client(client_id, client_type, client_zone, writer)
             elif status_msg == "heartbeat":
                 await self.handle_heartbeat(client_id)
             else:
@@ -113,23 +115,39 @@ class TCPServer:
                 # cleanup.cancel()
 
     #Handle client messages
-    async def handle_register_client(self, client_id, client_type, writer):
-        self.clients[client_id] = (None, writer, client_type, None, datetime.now())
+    async def handle_register_client(self, client_id, client_type, client_zone, writer):
+        # Validate zone match
+        if client_zone != self.zone:
+            self.log.warning(f"Zone mismatch: client {client_id} in zone {client_zone}, server in zone {self.zone}. Rejecting connection.")
+            try:
+                ack_msg = ServerMessage(self.host, "ack_register", {"status": "zone_mismatch"}, self.zone)
+                writer.write(ack_msg.serialize())
+                await writer.drain()
+            except Exception as e:
+                self.log.debug(f"Error sending zone mismatch response: {e}")
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception as e:
+                self.log.debug(f"Error closing writer: {e}")
+            return
+        
+        self.clients[client_id] = (None, writer, client_type, None, datetime.now(), client_zone)
         self.writer_to_client[writer] = client_id
-        self.log.info(f"Registered client {client_id} as {client_type}")
+        self.log.info(f"Registered client {client_id} as {client_type} in zone {client_zone}")
         # print(f"Registered client {client_id} as {client_type}")
-        ack_msg = ServerMessage(self.host, "ack_register", {"status": "ok"})
+        ack_msg = ServerMessage(self.host, "ack_register", {"status": "ok"}, self.zone)
         writer.write(ack_msg.serialize())
         await writer.drain()
-
     async def handle_heartbeat(self, client_id):
         if client_id in self.clients:
-            r, w, client_type, status, _ = self.clients[client_id]
-            self.clients[client_id] = (r, w, client_type, status, datetime.now())
+            r, w, client_type, status, _, client_zone = self.clients[client_id]
+            self.clients[client_id] = (r, w, client_type, status, datetime.now(), client_zone)
             self.log.info(f"Heartbeat received from {client_id}")
             # print(f"Heartbeat received from {client_id}")
         else:
             self.log.warning(f"Heartbeat from unregistered client {client_id}")
+            # print(f"Heartbeat from unregistered client {client_id}")ent_id}")
             # print(f"Heartbeat from unregistered client {client_id}")
 
 # For manual test, run this code:
