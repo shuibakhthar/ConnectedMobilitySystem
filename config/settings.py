@@ -41,5 +41,6 @@ GLOBAL_ELECTION_TIMEOUT = 5  # seconds for global server election
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 MAIN_CLIENT_LOGGER = logging.getLogger("MainClient")
 MAIN_SERVER_LOGGER = logging.getLogger("MainServer")
+TCP_SERVER_LOGGER = logging.getLogger(f"TCPServer[{BEACON_PORT}:{CONTROL_PORT}]")
 DISCOVERY_LOGGER = logging.getLogger("DiscoveryProtocol")
 ZONE_ELECTION_LOGGER = logging.getLogger("ZoneElection")

@@ -2,7 +2,7 @@ import asyncio
 from components.client_message import ClientMessage
 from components.server_message import deserialize_server_message
 import logging
-
+import uuid
 class TCPClient:
     def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
         self.server_host = server_host
@@ -10,7 +10,8 @@ class TCPClient:
         self.client_id = client_id
         self.client_type = client_type
         self.heartbeat_interval = heartbeat_interval
-        self.log = logging.getLogger(f"TCPClient[{client_id}]")
+        self.client_uid = uuid.uuid7()
+        self.log = logging.getLogger(f"TCPClient[{self.client_uid}]")
 
     async def connect(self):
         self.reader, self.writer = await asyncio.open_connection(self.server_host, self.server_port)

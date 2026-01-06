@@ -2,17 +2,74 @@ import asyncio
 from datetime import datetime
 from components.client_message import deserialize_client_message
 from components.server_message import ServerMessage
+from config.settings import TCP_SERVER_LOGGER
 import logging
 from datetime import datetime, timedelta
+import uuid
+import json
 
-class TCPServer:
-    def __init__(self, host, port, heartbeat_timeout=30):
+class ServerInfo:
+    def __init__(self, server_id, host, port, ctrl_port, zone=None, last_seen=None):
+        self.server_id = server_id
         self.host = host
         self.port = port
+        self.zone = zone
+        self.ctrl_port = ctrl_port
+        self.last_seen = last_seen
+    
+    @classmethod
+    def from_beacon(cls, beacon_data, last_seen=datetime.now()):
+        TCP_SERVER_LOGGER.debug(f"Parsing beacon data: {beacon_data}")
+        return cls(
+            server_id=beacon_data.get("server_id"),
+            host=beacon_data.get("host"),
+            port=beacon_data.get("tcp_port"),
+            ctrl_port=beacon_data.get("ctrl_port"),
+            zone=beacon_data.get("zone"),
+            last_seen=last_seen
+        )
+
+    def __repr__(self):
+        return f"ServerInfo(id={self.server_id}, host={self.host}, port={self.port}, zone={self.zone}, last_seen={self.last_seen})"
+    
+class ServerRegistry:
+    def __init__(self, ttl_seconds=15):
+        self.servers = {}
+        self.history = {}
+        self.ttl_seconds = ttl_seconds  # server_id -> ServerInfo
+
+    def register_server(self, beacon_msg, addr):
+        server_info = ServerInfo.from_beacon(json.loads(beacon_msg), last_seen=datetime.now())
+        self.servers[server_info.server_id] = server_info
+        self.history[server_info.server_id] = server_info
+
+    def get_server(self, server_id):
+        return self.servers.get(server_id)
+
+    def get_all_servers(self):
+        return list(self.servers.values())
+    
+    def get_history(self):
+        return list(self.history.values())
+    
+    def cleanup_stale_servers(self):
+        now = datetime.now()
+        stale_ids = [sid for sid, sinfo in self.servers.items() if (now - sinfo.last_seen).total_seconds() > self.ttl_seconds]
+        for sid in stale_ids:
+            del self.servers[sid]
+
+    def __repr__(self):
+        return f"ServerRegistry(servers={self.servers})"
+class TCPServer:
+    def __init__(self, host, port, ctrl_port, heartbeat_timeout=30):
+        self.uid = str(uuid.uuid7())
+        self.host = host
+        self.port = port
+        self.ctrl_port = ctrl_port
         self.heartbeat_timeout = timedelta(seconds=heartbeat_timeout)
         self.clients = {}  # sender_id -> (reader, writer, client_type, status, last_heartbeat)
         self.writer_to_client = {}  # writer -> sender_id
-        self.log = logging.getLogger(f"TCPServer[{host}:{port}]")
+        self.log = TCP_SERVER_LOGGER
 
     async def cleanup_task(self):
         try:
@@ -101,8 +158,8 @@ class TCPServer:
     async def start(self):
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         # print(f"TCP Server listening on {self.host}:{self.port}")
-        self.log.info(f"TCP Server listening on {self.host}:{self.port}")
-        # cleanup = asyncio.create_task(self.cleanup_task())
+        self.log.info(f"TCP Server {self.uid} listening on {self.host}:{self.port}")
+        cleanup = asyncio.create_task(self.cleanup_task())
         async with server:
             try:
                 await server.serve_forever()
@@ -110,7 +167,7 @@ class TCPServer:
                 self.log.info("Server serve_forever cancelled")
             finally:
                 self.log.debug("Cancelling cleanup task")
-                # cleanup.cancel()
+                cleanup.cancel()
 
     #Handle client messages
     async def handle_register_client(self, client_id, client_type, writer):

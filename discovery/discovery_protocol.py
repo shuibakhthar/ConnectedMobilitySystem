@@ -19,19 +19,19 @@ class BeaconServer:
         sock.setblocking(False)
 
         # Build message: include server metadata if provided
-        if self.zone and self.server_id and self.ctrl_port:
-            message = json.dumps({
+        # if self.zone and self.server_id and self.ctrl_port:
+        message = json.dumps({
                 "type": "server_beacon",
                 "client_addr": f"{self.server_host}:{self.server_port}",  # for clients
-                "zone": self.zone,
+                # "zone": self.zone,
                 "server_id": self.server_id,
                 "host": self.server_host,
                 "tcp_port": self.server_port,
-                "ctrl_port": self.ctrl_port
+                "ctrl_port": self.server_port + 1,
             }).encode('utf-8')
-        else:
-            # Legacy client-only beacon
-            message = f"{self.server_host}:{self.server_port}".encode('utf-8')
+        # else:
+        #     # Legacy client-only beacon
+        #     message = f"{self.server_host}:{self.server_port}".encode('utf-8')
 
         # message = f"{self.server_host}:{self.server_port}".encode('utf-8')
         broadcast_addr = ('255.255.255.255', BEACON_PORT)  # Global broadcast
@@ -63,7 +63,7 @@ class BeaconListener(asyncio.DatagramProtocol):
         if server_info not in self.discovered_servers:
             self.discovered_servers.add(server_info)
             if self.on_server_discovered:
-                self.on_server_discovered(server_info)
+                self.on_server_discovered(server_info, addr)
 
     # def datagram_received(self, data, addr):
     #     try:

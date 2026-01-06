@@ -1,8 +1,10 @@
 import asyncio
-from components.tcp_server import TCPServer
-from discovery.discovery_protocol import BeaconServer
+from components.tcp_server import TCPServer, ServerRegistry, ServerInfo
+from discovery.discovery_protocol import BeaconServer, listen_for_beacons
 from config.settings import MAIN_SERVER_LOGGER
 import argparse
+import datetime
+import json
 '''
 python main_server.py --host=127.0.0.1 --tcp_port=8888 --beacon_port=9999
 '''
@@ -21,8 +23,23 @@ async def main():
 
     args = parse_args()
 
-    server = TCPServer(args.host, args.tcp_port)
-    beacon = BeaconServer(args.host, args.tcp_port)
+    server = TCPServer(args.host, args.tcp_port, args.tcp_port + 1)
+    server_registry = ServerRegistry()
+    beacon = BeaconServer(args.host, args.tcp_port, server_id=server.uid)
+
+    listener, transport = await listen_for_beacons()
+
+    def on_server_discovered(server_info, addr):
+        try:
+            server_registry.register_server(server_info, addr)
+            server_registry.cleanup_stale_servers()
+            MAIN_SERVER_LOGGER.info(f"Updated registry: {server_info}")
+        except Exception as e:
+            MAIN_SERVER_LOGGER.error(f"Error parsing beacon data: {e}")
+            return
+
+
+    listener.on_server_discovered = on_server_discovered
 
     MAIN_SERVER_LOGGER.info(f"Starting Main Server on {args.host}:{args.tcp_port} with Beacon on port {args.beacon_port}") 
 
