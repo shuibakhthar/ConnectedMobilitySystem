@@ -2,23 +2,28 @@ import asyncio
 from datetime import datetime
 from components.client_message import deserialize_client_message
 from components.server_message import ServerMessage
-from config.settings import TCP_SERVER_LOGGER
+from config.settings import LEADER_MONITOR_INTERVAL, REGISTRY_HOST, REGISTRY_PORT, TCP_SERVER_LOGGER, LEADER_HEARTBEAT_TIMEOUT
 import logging
 from datetime import datetime, timedelta
 import uuid
 import json
-
+import time
+from election.bully_election import BullyElection
 class ServerInfo:
-    def __init__(self, server_id, host, port, ctrl_port, zone=None, last_seen=None):
+    def __init__(self, server_id, host, port, ctrl_port, zone=None, last_seen=None, leaderId=None, leaderInfo=None):
         self.server_id = server_id
         self.host = host
         self.port = port
         self.zone = zone
         self.ctrl_port = ctrl_port
         self.last_seen = last_seen
+
+        self.leaderId = leaderId
+        self.leaderInfo = leaderInfo
+        # revert all
     
     @classmethod
-    def from_beacon(cls, beacon_data, last_seen=datetime.now()):
+    def from_beacon(cls, beacon_data, last_seen=time.time()):
         TCP_SERVER_LOGGER.debug(f"Parsing beacon data: {beacon_data}")
         return cls(
             server_id=beacon_data.get("server_id"),
@@ -26,50 +31,210 @@ class ServerInfo:
             port=beacon_data.get("tcp_port"),
             ctrl_port=beacon_data.get("ctrl_port"),
             zone=beacon_data.get("zone"),
-            last_seen=last_seen
+            last_seen=last_seen,
+            leaderId=beacon_data.get("leader_id"),
+            leaderInfo=beacon_data.get("leader_info")
+        )
+    
+    # 
+    def update_Leader_Info(self, leaderId, leaderInfo):
+        self.leaderId = leaderId
+        self.leaderInfo = leaderInfo
+    
+    def get_leader_Info(self):
+        return {
+            "leader_id": self.leaderId,
+            "leader_info": self.leaderInfo
+        }
+    # 
+
+    def to_dict(self, shallow_leader = False):
+        d = {
+            "server_id": self.server_id,
+            "host": self.host,
+            "port": self.port,
+            "ctrl_port": self.ctrl_port,
+            "zone": self.zone,
+            "last_seen": self.last_seen,
+            "leader_id": self.leaderId,
+        }
+        if self.leaderInfo and not shallow_leader:
+            if isinstance(self.leaderInfo, ServerInfo):
+                d["leader_info"] = self.leaderInfo.to_dict(shallow_leader=True)
+            elif isinstance(self.leaderInfo, dict):
+                shallow = dict(self.leaderInfo)
+                shallow["leader_info"] = None
+                d["leader_info"] = shallow
+            else:
+                d["leader_info"] = None
+        else:
+            d["leader_info"] = None
+                
+        return d
+    
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            server_id=data.get("server_id"),
+            host=data.get("host"),
+            port=data.get("port"),
+            ctrl_port=data.get("ctrl_port"),
+            zone=data.get("zone"),
+            last_seen=data.get("last_seen"),
+            leaderId=data.get("leader_id"),
+            leaderInfo=data.get("leader_info")
         )
 
     def __repr__(self):
         return f"ServerInfo(id={self.server_id}, host={self.host}, port={self.port}, zone={self.zone}, last_seen={self.last_seen})"
     
-class ServerRegistry:
-    def __init__(self, ttl_seconds=15):
-        self.servers = {}
-        self.history = {}
-        self.ttl_seconds = ttl_seconds  # server_id -> ServerInfo
-
-    def register_server(self, beacon_msg, addr):
-        server_info = ServerInfo.from_beacon(json.loads(beacon_msg), last_seen=datetime.now())
-        self.servers[server_info.server_id] = server_info
-        self.history[server_info.server_id] = server_info
-
-    def get_server(self, server_id):
-        return self.servers.get(server_id)
-
-    def get_all_servers(self):
-        return list(self.servers.values())
-    
-    def get_history(self):
-        return list(self.history.values())
-    
-    def cleanup_stale_servers(self):
-        now = datetime.now()
-        stale_ids = [sid for sid, sinfo in self.servers.items() if (now - sinfo.last_seen).total_seconds() > self.ttl_seconds]
-        for sid in stale_ids:
-            del self.servers[sid]
-
-    def __repr__(self):
-        return f"ServerRegistry(servers={self.servers})"
 class TCPServer:
     def __init__(self, host, port, ctrl_port, heartbeat_timeout=30):
-        self.uid = str(uuid.uuid7())
-        self.host = host
-        self.port = port
-        self.ctrl_port = ctrl_port
+        self.serverInfo = ServerInfo( str(uuid.uuid7()), host, port, ctrl_port , last_seen=time.time(), leaderId=None)
+
+        # self.uid = str(uuid.uuid7())
+        # self.host = host
+        # self.port = port
+        # self.ctrl_port = ctrl_port
+        # revert
+
         self.heartbeat_timeout = timedelta(seconds=heartbeat_timeout)
         self.clients = {}  # sender_id -> (reader, writer, client_type, status, last_heartbeat)
         self.writer_to_client = {}  # writer -> sender_id
         self.log = TCP_SERVER_LOGGER
+        self.local_server_registry = [] 
+        
+        self.leader_Node = None  # List of known servers
+
+        self.election = BullyElection(
+            node_id=self.serverInfo.server_id, 
+            get_registry_func=lambda: self.fetch_server_registry,
+            host=self.serverInfo.host,
+            ctrl_port=self.serverInfo.ctrl_port,
+            serverInfo=self.serverInfo,
+        )
+
+    async def fetch_server_registry(self, registry_host=REGISTRY_HOST, registry_port=REGISTRY_PORT):
+        try:
+            reader, writer = await asyncio.open_connection(registry_host, registry_port)
+            request_msg = json.dumps({"request_type": "get_registry"}).encode('utf-8')
+            writer.write(request_msg)
+            await writer.drain()
+            data = await reader.read()
+            writer.close()
+            await writer.wait_closed()
+            response = json.loads(data.decode('utf-8'))
+            return response
+        except Exception as e:
+            self.log.error(f"Error fetching server registry: {e}")
+            return None
+        
+    async def update_registry_periodically(self, interval=5):
+        try:
+            while True:
+                new_registry = await self.fetch_server_registry()
+                if new_registry:
+                    self.local_server_registry = new_registry.get("server_list", [])
+                    self.serverInfo.update_Leader_Info(
+                        new_registry.get("leader_id"),
+                        new_registry.get("leader_info")
+                    )
+                    self.log.debug("Updated server registry periodically")
+                    self.log.debug(f"Leader Info: {self.serverInfo.get_leader_Info()}")
+                    print("Updated registry:", self.local_server_registry)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            self.log.info("Registry updater task cancelled")
+        except Exception as e:
+            self.log.error(f"Error in registry updater: {e}")
+
+    async def handle_ctrl_message(self, reader, writer):
+        try:
+            data = await reader.read()
+            from components.server_message import deserialize_server_message
+            msg = deserialize_server_message(data.decode())
+            if not msg:
+                return
+            if msg.status == "election_start":
+                await self.election.handle_election_message(msg.payload["from"])
+            elif msg.status == "election_ack_ok":
+                await self.election.handle_ok_message(msg.payload["from"])
+            elif msg.status == "election_coordinator":
+                await self.election.handle_coordinator_message(msg.payload["from"])
+        except Exception as e:
+            self.log.error(f"Error handling ctrl message: {e}")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    def update_Leader_Node(self):
+        leader = self.get_leader()
+        if leader:
+            self.leader_Node = leader
+            self.log.info(f"Updated Leader: {self.election.coordinator_id} ({leader['host']}:{leader['port']})")
+        else:
+            self.log.info(f"Updated Leader: {self.election.coordinator_id} (not found in registry)")
+
+    async def get_leader(self, registry_host=REGISTRY_HOST, registry_port=REGISTRY_PORT):
+        '''
+        if self.election.coordinator_id is None:
+            return None
+        leader = next((s for s in self.local_server_registry if s['server_id'] == self.election.coordinator_id), None)
+        self.log.debug(f"Leader lookup: {leader}")
+        return leader
+        '''
+        try:
+            reader, writer = await asyncio.open_connection(registry_host, registry_port)
+            request_msg = json.dumps({"request_type": "leader_info"}).encode('utf-8')
+            writer.write(request_msg)
+            await writer.drain()
+            data = await reader.read()
+            writer.close()
+            await writer.wait_closed()
+            response = json.loads(data.decode('utf-8'))
+            return response
+        except Exception as e:
+            self.log.error(f"Error fetching server registry: {e}")
+            return None
+
+    def is_leader_missing_or_dead(self):
+        # if self.election.coordinator_id is None:
+        #     return True
+        # leader = self.get_leader()
+
+        '''
+        if not self.leader_Node:
+            self.log.debug("Leader node is None")
+            return True
+        # Check last_seen (should be epoch float)
+        if time.time() - self.leader_Node['last_seen'] > LEADER_HEARTBEAT_TIMEOUT:
+            self.log.debug(f"Leader last seen: {self.leader_Node['last_seen']}, current time: {time.time()}")
+            self.log.debug("Leader node is considered dead due to heartbeat timeout")
+            return True
+        return False
+        '''
+        # revert
+        
+        if not self.serverInfo.leaderId or not self.serverInfo.leaderInfo:
+            self.log.debug(f"Leader node is None {self.serverInfo.leaderId} {self.leader_Node}")
+            return True
+        # Check last_seen (should be epoch float)
+        if time.time() - self.serverInfo.leaderInfo['last_seen'] > LEADER_HEARTBEAT_TIMEOUT:
+            self.log.debug(f"Leader last seen: {self.serverInfo.leaderInfo['last_seen']}, current time: {time.time()}")
+            self.log.debug("Leader node is considered dead due to heartbeat timeout")
+            return True
+        return False
+
+    async def monitor_leader(self):
+        try:
+            while True:
+                await asyncio.sleep(LEADER_MONITOR_INTERVAL)
+                if self.is_leader_missing_or_dead():
+                    self.log.warning("Leader missing or dead, starting election")
+                    await self.election.start_election()
+                    # self.update_Leader_Node()
+        except asyncio.CancelledError:
+            self.log.info("Leader monitor task cancelled")
 
     async def cleanup_task(self):
         try:
@@ -156,18 +321,62 @@ class TCPServer:
 
 
     async def start(self):
+
+        registry_response = await self.fetch_server_registry()
+        self.log.info(f"Fetched server registry: {registry_response}")
+
+        try:
+            if registry_response:
+                self.local_server_registry = registry_response.get("server_list", [])
+                self.serverInfo.update_Leader_Info(
+                    registry_response.get("leader_id"),
+                    registry_response.get("leader_info")
+                )
+                self.log.info("Initialized server registry from registry service")
+                self.log.info(f"Leader Info: {self.serverInfo.get_leader_Info()}")
+        except Exception as e:
+            self.log.error(f"Error updating server registry from response: {e}")
+
+        # print(f"Fetched server registry: {self.local_server_registry}")
+        
+        '''
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         # print(f"TCP Server listening on {self.host}:{self.port}")
         self.log.info(f"TCP Server {self.uid} listening on {self.host}:{self.port}")
+        # CTRL_SERVER is where all the server related functionality happens like election, inter-server comms, etc.
+        ctrl_server = await asyncio.start_server(self.handle_ctrl_message, self.host, self.ctrl_port)
+        self.log.info(f"Control Server {self.uid} listening on {self.host}:{self.ctrl_port}")
+        '''
+        # revert
+        
+        server = await asyncio.start_server(self.handle_client, self.serverInfo.host, self.serverInfo.port)
+        # print(f"TCP Server listening on {self.host}:{self.port}")
+        self.log.info(f"TCP Server {self.serverInfo.server_id} listening on {self.serverInfo.host}:{self.serverInfo.port}")
+
+        # CTRL_SERVER is where all the server related functionality happens like election, inter-server comms, etc.
+        ctrl_server = await asyncio.start_server(self.handle_ctrl_message, self.serverInfo.host, self.serverInfo.ctrl_port)
+        self.log.info(f"Control Server {self.serverInfo.server_id} listening on {self.serverInfo.host}:{self.serverInfo.ctrl_port}")
+        
+        # self.get_leader()
+        if self.is_leader_missing_or_dead():
+            await self.election.start_election()
+        
+        # self.update_Leader_Node()
+    
         cleanup = asyncio.create_task(self.cleanup_task())
-        async with server:
+        registry_updater = asyncio.create_task(self.update_registry_periodically())
+        leader_monitor = asyncio.create_task(self.monitor_leader())
+        async with server, ctrl_server:
             try:
-                await server.serve_forever()
+                # await server.serve_forever()
+                await asyncio.gather(server.serve_forever(), ctrl_server.serve_forever())
             except asyncio.CancelledError:
                 self.log.info("Server serve_forever cancelled")
             finally:
                 self.log.debug("Cancelling cleanup task")
                 cleanup.cancel()
+                registry_updater.cancel()
+                leader_monitor.cancel()
 
     #Handle client messages
     async def handle_register_client(self, client_id, client_type, writer):
