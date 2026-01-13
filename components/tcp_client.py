@@ -3,6 +3,8 @@ from components.client_message import ClientMessage
 from components.server_message import deserialize_server_message
 import logging
 import uuid
+
+from config.settings import MAX_RETRIES
 class TCPClient:
     def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
         self.server_host = server_host
@@ -14,8 +16,63 @@ class TCPClient:
         self.log = logging.getLogger(f"TCPClient[{self.client_uid}]")
 
     async def connect(self):
-        self.reader, self.writer = await asyncio.open_connection(self.server_host, self.server_port)
+
+        server_host, server_port = await self.request_server_assignment()
+
+        self.reader, self.writer = await asyncio.open_connection(server_host, server_port)
         await self.register()
+
+    async def request_server_assignment(self, max_retries= MAX_RETRIES):
+        leader_host = self.server_host
+        leader_port = self.server_port
+
+        for attempt in range(max_retries):
+            try:
+                self.log.info(f"Requesting server assignment from leader at {leader_host}:{leader_port}, attempt {attempt + 1}")
+                reader, writer = await asyncio.open_connection(leader_host, leader_port)
+                request_msg = ClientMessage(self.client_id, self.client_type, "request_server_assignment",  {})
+                writer.write(request_msg.serialize())
+                await writer.drain()
+
+                response = await reader.readline()
+                if not response:
+                    raise ConnectionError("No response received from leader")
+                
+                response_msg = deserialize_server_message(response.decode())
+                if response_msg:
+                    if response_msg.status == "assign_server":
+                        assigned_info = response_msg.payload
+                        assigned_host = assigned_info.get("host")
+                        assigned_port = assigned_info.get("port")
+                        self.log.info(f"Assigned to server at {assigned_host}:{assigned_port}")
+                        writer.close()
+                        await writer.wait_closed()
+                        return assigned_host, assigned_port
+                    elif response_msg.status == "redirect_to_leader":
+                        new_leader_info = response_msg.payload
+                        self.log.info(f"Redirected to new leader {new_leader_info.get('host')}:{new_leader_info.get('port') }")
+                        leader_host = new_leader_info.get("host")
+                        leader_port = new_leader_info.get("port")
+                        writer.close()
+                        await writer.wait_closed()
+                        await asyncio.sleep(1)  # brief pause before retrying
+                        continue
+
+                else:
+                    raise ValueError("Invalid response or status from leader")
+                
+            except (ConnectionError, OSError) as e:
+                self.log.error(f"Assignment attempt {attempt + 1} connection failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+                else:
+                        raise
+            except Exception as e:
+                self.log.error(f"Assignment attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(2)
+        raise ConnectionError("Failed to get server assignment after all retries")
 
     async def register(self):
         reg_msg = ClientMessage(self.client_id, self.client_type, "register", {})

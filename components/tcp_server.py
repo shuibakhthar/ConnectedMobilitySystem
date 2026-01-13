@@ -135,10 +135,17 @@ class TCPServer:
                 new_registry = await self.fetch_server_registry()
                 if new_registry:
                     self.local_server_registry = new_registry.get("server_list", [])
-                    self.serverInfo.update_Leader_Info(
-                        new_registry.get("leader_id"),
-                        new_registry.get("leader_info")
-                    )
+                    leader_id = new_registry.get("leader_id")
+                    if leader_id:
+                        fresh_leader = next(
+                            (s for s in self.local_server_registry if s['server_id'] == leader_id), new_registry.get("leader_info")
+                        )
+                        self.serverInfo.update_Leader_Info(leader_id, fresh_leader)
+                    else:
+                        self.serverInfo.update_Leader_Info(
+                            new_registry.get("leader_id"),
+                            new_registry.get("leader_info")
+                        )
                     self.log.debug("Updated server registry periodically")
                     self.log.debug(f"Leader Info: {self.serverInfo.get_leader_Info()}")
                     print("Updated registry:", self.local_server_registry)
@@ -198,24 +205,8 @@ class TCPServer:
             return None
 
     def is_leader_missing_or_dead(self):
-        # if self.election.coordinator_id is None:
-        #     return True
-        # leader = self.get_leader()
-
-        '''
-        if not self.leader_Node:
-            self.log.debug("Leader node is None")
-            return True
-        # Check last_seen (should be epoch float)
-        if time.time() - self.leader_Node['last_seen'] > LEADER_HEARTBEAT_TIMEOUT:
-            self.log.debug(f"Leader last seen: {self.leader_Node['last_seen']}, current time: {time.time()}")
-            self.log.debug("Leader node is considered dead due to heartbeat timeout")
-            return True
-        return False
-        '''
-        # revert
         
-        if not self.serverInfo.leaderId or not self.serverInfo.leaderInfo:
+        '''if not self.serverInfo.leaderId or not self.serverInfo.leaderInfo:
             self.log.debug(f"Leader node is None {self.serverInfo.leaderId} {self.leader_Node}")
             return True
         # Check last_seen (should be epoch float)
@@ -223,6 +214,29 @@ class TCPServer:
             self.log.debug(f"Leader last seen: {self.serverInfo.leaderInfo['last_seen']}, current time: {time.time()}")
             self.log.debug("Leader node is considered dead due to heartbeat timeout")
             return True
+        return False'''
+
+        # Check if leader ID exists
+        if not self.serverInfo.leaderId:
+            self.log.debug("No leader ID set")
+            return True
+        
+        # Look up leader in the FRESH server registry (updated every 5 seconds)
+        leader = next(
+            (s for s in self.local_server_registry if s['server_id'] == self.serverInfo.leaderId), 
+            None
+        )
+        
+        if not leader:
+            self.log.debug(f"Leader {self.serverInfo.leaderId} not found in registry")
+            return True
+        
+        # Check last_seen from live registry data (not frozen leader_info)
+        time_since_seen = time.time() - leader['last_seen']
+        if time_since_seen > LEADER_HEARTBEAT_TIMEOUT:
+            self.log.debug(f"Leader last seen {time_since_seen:.1f}s ago (timeout: {LEADER_HEARTBEAT_TIMEOUT}s)")
+            return True
+            
         return False
 
     async def monitor_leader(self):
@@ -289,16 +303,56 @@ class TCPServer:
             writer.close()
             await writer.wait_closed()
 
-            # sender_id = None
-            # for sid, (r, w) in self.clients.items():
-            #     if w == writer:
-            #         sender_id = sid
-            #         break
-            # if sender_id:
-            #     print(f"Client {sender_id} disconnected")
-            #     del self.clients[sender_id]
-            # writer.close()
-            # await writer.wait_closed()
+    async def handle_client_assignment_request(self, client_id, client_type, writer):
+        try:
+            self.log.debug(f"Handling server assignment request from {client_id} ({client_type})")
+            leader_data = await self.get_leader()
+            if not leader_data:
+                self.log.error("No leader data available for assignment")
+                ack_msg = ServerMessage(self.serverInfo.server_id, "assign_server", {"status": "error", "message": "No leader available"})
+                writer.write(ack_msg.serialize())
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return    
+            
+            registry_leader_id = leader_data.get("leader_id")
+            registry_leader_info = leader_data.get("leader_info")
+            if registry_leader_id != self.serverInfo.server_id:
+                self.log.error("This server is not the leader, cannot assign servers")
+                ack_msg = ServerMessage(self.serverInfo.server_id, "assign_server", {"status": "error", "message": "Not the leader", "redirect_to_leader": True, "host": registry_leader_info.get("host"), "port": registry_leader_info.get("port") })
+                writer.write(ack_msg.serialize())
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return
+            
+            self.log.info(f"Assigning server to client {client_id} ({client_type})")
+            # Simple assignment logic: assign to the first server in the registry
+            assigned_server = next(
+                (s for s in self.local_server_registry), 
+                None
+            )
+            if assigned_server:
+                ack_msg = ServerMessage(self.serverInfo.server_id, "assign_server", {
+                    "status": "ok",
+                    "host": assigned_server['host'],
+                    "port": assigned_server['port'],
+                    "server_id": assigned_server['server_id']
+                })
+                writer.write(ack_msg.serialize())
+                await writer.drain()
+                self.log.info(f"Assigned server {assigned_server['server_id']} to client {client_id}")
+                self.log.debug(f"Responce: {ack_msg.serialize()}")
+                writer.close()
+                await writer.wait_closed()
+        except Exception as e:
+            self.log.error(f"Error handling assignment request: {e}")
+            ack_msg = ServerMessage(self.serverInfo.server_id, "assign_server", {"status": "error", "message": str(e)})
+            writer.write(ack_msg.serialize())
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
 
     async def process_message(self, msg, writer):
         try:
@@ -310,6 +364,8 @@ class TCPServer:
             #register client if not already registered
             if status_msg == "register":
                 await self.handle_register_client(client_id, client_type, writer)
+            elif status_msg == "request_server_assignment":
+                await self.handle_client_assignment_request(client_id, client_type, writer)
             elif status_msg == "heartbeat":
                 await self.handle_heartbeat(client_id)
             else:
@@ -384,7 +440,7 @@ class TCPServer:
         self.writer_to_client[writer] = client_id
         self.log.info(f"Registered client {client_id} as {client_type}")
         # print(f"Registered client {client_id} as {client_type}")
-        ack_msg = ServerMessage(self.host, "ack_register", {"status": "ok"})
+        ack_msg = ServerMessage(self.serverInfo.server_id, "ack_register", {"status": "ok"})
         writer.write(ack_msg.serialize())
         await writer.drain()
 

@@ -1,7 +1,7 @@
 import asyncio
 from components.tcp_client import TCPClient  # Your previously written client TCP code
 from discovery.discovery_protocol import listen_for_beacons
-from config.settings import MAIN_CLIENT_LOGGER
+from config.settings import MAIN_CLIENT_LOGGER, REGISTRY_HOST, REGISTRY_PORT
 import argparse
 import json
 '''
@@ -19,6 +19,32 @@ def parse_args():
     p.add_argument('--client_type', type=str, default="Ambulance", help="Type of the client")
     p.add_argument('--heartbeat_interval', type=int, default=15, help="Interval for sending heartbeats")
     return p.parse_args()
+
+async def discover_leader(timeout=15):
+    try: 
+        MAIN_CLIENT_LOGGER.info("Discovering leader server...")
+        reader, writer = await asyncio.open_connection(REGISTRY_HOST, REGISTRY_PORT)
+        request_msg = json.dumps({"request_type": "leader_info"}).encode('utf-8')
+        writer.write(request_msg)
+        await writer.drain()
+        data = await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+
+    
+        response = json.loads(data.decode('utf-8'))
+        MAIN_CLIENT_LOGGER.info(f"Leader discovery response: {response}")
+        leader_info = response.get("leader_info")
+        leader_id = response.get("leader_id")
+        if leader_info:
+            host = leader_info.get('host')
+            port = leader_info.get('port')
+            MAIN_CLIENT_LOGGER.info(f"Discovered leader server: {leader_id} at {host}:{port}")
+            return host, int(port)
+    except Exception as e:
+        MAIN_CLIENT_LOGGER.error(f"Error discovering leader server: {e}")
+        return None, None
+    
 
 async def discover_server(timeout=15):
     protocol, transport = await listen_for_beacons()
@@ -52,7 +78,9 @@ async def main():
     args = parse_args()
     
     # client_ids = ("ambulance_1","ambulance_2", "hospital_1","car_1")
-    server_host, server_port = await discover_server(args.discover_timeout if hasattr(args, 'discover_timeout') else 15)
+    # server_host, server_port = await discover_server(args.discover_timeout if hasattr(args, 'discover_timeout') else 15)
+    server_host, server_port = await discover_leader(args.discover_timeout if hasattr(args, 'discover_timeout') else 15)
+
     if not server_host:
         MAIN_CLIENT_LOGGER.info("No server discovered.")
         # print("No server discovered.")

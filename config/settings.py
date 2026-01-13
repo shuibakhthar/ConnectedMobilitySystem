@@ -10,11 +10,12 @@ NEEDED_PAYLOADS = {
    "election_start": ["from"],
    "election_ack_ok": ["from"],
     "election_coordinator": ["from"],
+    "assign_server": ["host", "port", "server_id"],
 }
 
 CLIENT_TYPES = ["Ambulance", "Car", "TrafficLight", "Hospital"]
 CLIENT_STATUS = {
-    "AllClients": ["register", "location_update", "heartbeat"],
+    "AllClients": ["register", "location_update", "heartbeat","request_server_assignment"],
     "Ambulance": ["report_crash", "answer_call", "arrived_at_scene", "transporting_patient", "at_hospital", "available"],
     "Car": ["report_crash"],
     "TrafficLight": ["light_green", "light_yellow", "light_red"],
@@ -49,6 +50,8 @@ LEADER_MONITOR_INTERVAL = 3  # seconds between leader health checks
 
 REGISTRY_CLEANUP_INTERVAL = 10  # seconds between registry cleanup checks
 SERVER_STALE_TIME = 20  # seconds before a server is considered stale
+
+MAX_RETRIES = 3  # max retries for certain operations
 
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
