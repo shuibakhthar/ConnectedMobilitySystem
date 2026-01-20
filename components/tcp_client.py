@@ -1,10 +1,9 @@
 import asyncio
 from components.client_message import ClientMessage
 from components.server_message import deserialize_server_message
-import logging
 import uuid
 
-from config.settings import MAX_RETRIES
+from config.settings import MAX_RETRIES, TCP_CLIENT_LOGGER
 class TCPClient:
     def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
         self.server_host = server_host
@@ -13,7 +12,7 @@ class TCPClient:
         self.client_type = client_type
         self.heartbeat_interval = heartbeat_interval
         self.client_uid = uuid.uuid7()
-        self.log = logging.getLogger(f"TCPClient[{self.client_uid}]")
+        self.log = TCP_CLIENT_LOGGER
 
     async def connect(self):
 
@@ -119,10 +118,18 @@ class TCPClient:
         except KeyboardInterrupt:
             self.log.info("Client shutting down")
             # print("Client shutting down")
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
+            self.log.error(f"Connection lost: {e}. Server may have shut down.")
+        except Exception as e:
+            self.log.error(f"Unexpected error in client run: {e}", exc_info=True)
         finally:
             listener_task.cancel()
-            self.writer.close()
-            await self.writer.wait_closed()
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception as e:
+                self.log.debug(f"Error closing connection: {e}")
+            self.log.info("Client connection closed")
 
 # For manual test, run this code:
 if __name__ == "__main__":

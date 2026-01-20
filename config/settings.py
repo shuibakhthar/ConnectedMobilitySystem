@@ -1,4 +1,62 @@
 import logging
+import os
+from pathlib import Path
+import socket
+
+def get_local_ip():
+    """Auto-detect local network IP by connecting to external host"""
+    try:
+        # Connect to Google DNS (doesn't actually send data)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        # Fallback to localhost
+        return "127.0.0.1"
+
+# Logging configuration
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
+
+def setup_server_file_logging(host, port, server_id=None):
+    """Setup file logging for server"""
+    log_filename = f"{host}_{port}_{server_id[:8]}.log" if server_id else f"{host}_{port}.log"
+    log_path = LOG_DIR / log_filename
+    
+    file_handler = logging.FileHandler(log_path, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+    
+    # Add to all loggers
+    for logger_name in ["MainServer", "TCPServer", "DiscoveryProtocol", "BullyElection"]:
+        logger = logging.getLogger(logger_name)
+        logger.addHandler(file_handler)
+    
+    return str(log_path)
+
+def setup_client_file_logging(client_id, client_type, client_uuid=None):
+    """Setup file logging for client - attach to both MainClient and TCPClient loggers"""
+    log_filename = f"{client_id}_{client_type}_{client_uuid[:8]}.log" if client_uuid else f"{client_id}_{client_type}.log"
+    log_path = LOG_DIR / log_filename
+    
+    file_handler = logging.FileHandler(log_path, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+    
+    # Add to both MainClient and TCPClient loggers
+    for logger_name in ["MainClient", "TCPClient", "MainServer", "TCPServer", "DiscoveryProtocol", "BullyElection"]:
+        logger = logging.getLogger(logger_name)
+        logger.addHandler(file_handler)
+        logger.setLevel(logging.DEBUG)  # Ensure logger itself passes DEBUG messages
+    
+    return str(log_path)
+
+
 
 SERVER_STATUS = [
     "ack_register", "ack_crash", "ack_location_update",
@@ -32,7 +90,7 @@ NEEDED_PAYLOADS = {
     "dispose_crash": ["crash_id", "car_client_id"]
 }
 
-REGISTRY_HOST = '127.0.0.1'
+REGISTRY_HOST = '192.168.0.118'
 REGISTRY_PORT = 9998
 
 
@@ -57,6 +115,14 @@ MAX_RETRIES = 3  # max retries for certain operations
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 MAIN_CLIENT_LOGGER = logging.getLogger("MainClient")
 MAIN_SERVER_LOGGER = logging.getLogger("MainServer")
-TCP_SERVER_LOGGER = logging.getLogger(f"TCPServer[{BEACON_PORT}:{CONTROL_PORT}]")
+TCP_SERVER_LOGGER = logging.getLogger("TCPServer")
+TCP_CLIENT_LOGGER = logging.getLogger("TCPClient")
 DISCOVERY_LOGGER = logging.getLogger("DiscoveryProtocol")
 BULLY_ELECTION_LOGGER = logging.getLogger("BullyElection")
+
+def get_tcp_client_logger(client_uid: str):
+    """Return a namespaced TCP client logger for a given client UID.
+
+    NOTE: Handlers are attached via setup_client_file_logging() in main_client.
+    """
+    return logging.getLogger(f"TCPClient[{client_uid}]")
