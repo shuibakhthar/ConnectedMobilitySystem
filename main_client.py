@@ -11,6 +11,9 @@ def parse_args():
     p.add_argument("--client_id", type=str, default="ambulance_1")
     p.add_argument("--client_type", type=str, default="Ambulance")
     p.add_argument("--heartbeat_interval", type=int, default=15)
+    p.add_argument("--latitude", type=float, default=0.0, help="Client latitude (used for crash/location)")
+    p.add_argument("--longitude", type=float, default=0.0, help="Client longitude (used for crash/location)")
+    p.add_argument("--current_occupancy", type=int, default=0, help="Number of beds available (for Hospital clients)")
     return p.parse_args()
 
 
@@ -66,6 +69,9 @@ async def main():
         client_id=args.client_id,
         client_type=args.client_type,
         heartbeat_interval=args.heartbeat_interval,
+        latitude=args.latitude,
+        longitude=args.longitude,
+        current_occupancy=args.current_occupancy,
     )
     await client.run()
 

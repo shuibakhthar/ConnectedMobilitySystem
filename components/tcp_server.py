@@ -94,6 +94,7 @@ class TCPServer:
         self.clients = {}
         self.writer_to_client = {}
         self.log = TCP_SERVER_LOGGER
+        self.crash_counter = 0
 
         self.election = BullyElection(
             serverInfo=self.serverInfo,
@@ -282,6 +283,12 @@ class TCPServer:
                 await self.handle_client_assignment_request(client_id, client_type, writer)
             elif status_msg == "heartbeat":
                 await self.handle_heartbeat(client_id)
+            elif status_msg == "report_crash":
+                await self.handle_crash_report(client_id, client_type, msg.payload, writer)
+            elif status_msg == "occupancy_update":
+                await self.handle_occupancy_update(client_id, client_type, msg.payload, writer)
+            elif status_msg in ["on_duty", "available", "arrived_at_scene", "transporting_patient", "at_hospital", "answer_call"]:
+                await self.handle_ambulance_status(client_id, client_type, status_msg, msg.payload, writer)
             else:
                 self.log.info(f"Received unknown message from {client_id}: {msg}")
         except Exception as e:
@@ -300,6 +307,80 @@ class TCPServer:
             r, w, ct, st, _ = self.clients[client_id]
             self.clients[client_id] = (r, w, ct, st, datetime.now())
             self.log.debug(f"Heartbeat updated for {client_id}")
+
+    async def handle_crash_report(self, client_id, client_type, payload, writer):
+        latitude = payload.get("latitude")
+        longitude = payload.get("longitude")
+
+        self.crash_counter += 1
+        crash_id = self.crash_counter
+        self.log.warning(
+            f"CRASH REPORTED from {client_id} ({client_type}) - lat={latitude}, lon={longitude}, crash_id={crash_id}"
+        )
+
+        # Update client status to crashed (if registered)
+        if client_id in self.clients:
+            r, w, ct, _, _ = self.clients[client_id]
+            self.clients[client_id] = (r, w, ct, "crashed", datetime.now())
+
+        ack = ServerMessage(
+            self.serverInfo.server_id,
+            "ack_crash",
+            {
+                "client_id": client_id,
+                "client_type": client_type,
+                "crash_id": crash_id,
+                "latitude": latitude,
+                "longitude": longitude,
+            },
+        )
+        writer.write(ack.serialize())
+        await writer.drain()
+
+    async def handle_occupancy_update(self, client_id, client_type, payload, writer):
+        current_occupancy = payload.get("current_occupancy")
+        self.log.info(f"OCCUPANCY UPDATE from {client_id} ({client_type}) - {current_occupancy} beds available")
+
+        ack = ServerMessage(
+            self.serverInfo.server_id,
+            "ack_occupancy_update",
+            {
+                "client_id": client_id,
+                "current_occupancy": current_occupancy,
+            },
+        )
+        writer.write(ack.serialize())
+        await writer.drain()
+
+    async def handle_ambulance_status(self, client_id, client_type, status, payload, writer):
+        """Handle ambulance status updates"""
+        status_display = {
+            "on_duty": "ON DUTY",
+            "available": "AVAILABLE",
+            "arrived_at_scene": "REACHED AT SCENE",
+            "transporting_patient": "TRANSPORTING PATIENT",
+            "at_hospital": "AT HOSPITAL",
+            "answer_call": "ANSWERING CALL"
+        }
+        
+        display_status = status_display.get(status, status.upper())
+        self.log.info(f"AMBULANCE STATUS UPDATE from {client_id} ({client_type}) - Status: {display_status}")
+
+        # Update client status if registered
+        if client_id in self.clients:
+            r, w, ct, _, _ = self.clients[client_id]
+            self.clients[client_id] = (r, w, ct, status, datetime.now())
+
+        ack = ServerMessage(
+            self.serverInfo.server_id,
+            f"ack_{status}",
+            {
+                "client_id": client_id,
+                "status": status,
+            },
+        )
+        writer.write(ack.serialize())
+        await writer.drain()
 
     async def start(self):
         # Start monitoring and cleanup tasks
