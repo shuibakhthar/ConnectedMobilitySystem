@@ -140,20 +140,36 @@ class TCPClient:
         await self.writer.drain()
         self.log.info(f"Occupancy update sent to server: {self.current_occupancy} beds available")
 
-    async def send_ambulance_status(self, status):
+    async def send_ambulance_status(self, status, call_id="default_call", hospital_id="default_hospital"):
         """Send ambulance status update to the server."""
         if self.client_type != "Ambulance":
             return
         
-        ambulance_msg = ClientMessage(
-            self.client_id,
-            self.client_type,
-            status,
-            {},
-        )
-        self.writer.write(ambulance_msg.serialize())
-        await self.writer.drain()
-        self.log.info(f"Ambulance status sent to server: {status}")
+        # Build payload based on what the status requires
+        payload = {}
+        if status in ["answer_call", "arrived_at_scene"]:
+            payload["call_id"] = call_id
+            self.log.debug(f"Preparing ambulance status '{status}' with payload: {payload}")
+        elif status in ["transporting_patient", "at_hospital"]:
+            payload["call_id"] = call_id
+            payload["hospital_id"] = hospital_id
+            self.log.debug(f"Preparing ambulance status '{status}' with payload: {payload}")
+        else:
+            self.log.debug(f"Preparing ambulance status '{status}' with empty payload")
+        
+        try:
+            ambulance_msg = ClientMessage(
+                self.client_id,
+                self.client_type,
+                status,
+                payload,
+            )
+            self.writer.write(ambulance_msg.serialize())
+            await self.writer.drain()
+            self.log.info(f"Ambulance status sent to server: {status} with payload {payload}")
+        except ValueError as e:
+            self.log.error(f"Failed to send ambulance status '{status}': {e}")
+            self.log.error(f"Status '{status}' requires specific payload fields. Check config/settings.py for required fields.")
 
     async def monitor_occupancy_key(self):
         """For Hospital clients: press +/- to update beds available, or enter a number."""
@@ -287,10 +303,10 @@ class TCPClient:
                             await self.send_ambulance_status("available")
                         elif ch and ch.upper() == "R":
                             self.log.info("Ambulance status: Reached at scene")
-                            await self.send_ambulance_status("arrived_at_scene")
+                            await self.send_ambulance_status("arrived_at_scene", call_id="emergency_001")
                         elif ch and ch.upper() == "T":
                             self.log.info("Ambulance status: Transporting patient")
-                            await self.send_ambulance_status("transporting_patient")
+                            await self.send_ambulance_status("transporting_patient", call_id="emergency_001", hospital_id="hospital_001")
                     await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 return
@@ -310,10 +326,10 @@ class TCPClient:
                     await self.send_ambulance_status("available")
                 elif key == "R":
                     self.log.info("Ambulance status: Reached at scene")
-                    await self.send_ambulance_status("arrived_at_scene")
+                    await self.send_ambulance_status("arrived_at_scene", call_id="emergency_001")
                 elif key == "T":
                     self.log.info("Ambulance status: Transporting patient")
-                    await self.send_ambulance_status("transporting_patient")
+                    await self.send_ambulance_status("transporting_patient", call_id="emergency_001", hospital_id="hospital_001")
         except asyncio.CancelledError:
             return
 
