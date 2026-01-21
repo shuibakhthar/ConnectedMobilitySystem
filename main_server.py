@@ -4,6 +4,8 @@ from components.tcp_server import TCPServer
 from discovery.discovery_protocol import ServerRegistry, BeaconServer, start_beacon_listener, cleanup_loop
 from config.settings import MAIN_SERVER_LOGGER, BEACON_PORT, setup_server_file_logging, get_local_ip
 
+''' python main_server.py --tcp_port=8000'''
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Main Server with Dynamic Discovery")

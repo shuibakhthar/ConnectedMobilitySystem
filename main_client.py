@@ -2,12 +2,19 @@ import asyncio
 import argparse
 import uuid
 from discovery.discovery_protocol import ServerRegistry, start_beacon_listener
-from config.settings import MAIN_CLIENT_LOGGER, setup_client_file_logging
+from config.settings import MAIN_CLIENT_LOGGER, setup_client_file_logging, CLIENT_SERVER_DISCOVERY_TIMEOUT
 
+
+'''
+python main_client.py --discover_timeout=10 --client_id=ambulance_1  --client_type=Ambulance --heartbeat_interval=15
+python main_client.py --discover_timeout=10 --client_id=ambulance_2  --client_type=Ambulance --heartbeat_interval=15
+python main_client.py --discover_timeout=10 --client_id=hospital_1  --client_type=Hospital --heartbeat_interval=15
+python main_client.py --discover_timeout=10 --client_id=car_1  --client_type=car --heartbeat_interval=15
+'''
 
 def parse_args():
     p = argparse.ArgumentParser(description="Main Client with Dynamic Discovery")
-    p.add_argument("--discover_timeout", type=int, default=10, help="Time to listen for beacons")
+    p.add_argument("--discover_timeout", type=int, default=CLIENT_SERVER_DISCOVERY_TIMEOUT, help="Time to listen for beacons")
     p.add_argument("--client_id", type=str, default="ambulance_1")
     p.add_argument("--client_type", type=str, default="Ambulance")
     p.add_argument("--heartbeat_interval", type=int, default=15)
@@ -17,7 +24,7 @@ def parse_args():
     return p.parse_args()
 
 
-async def discover_leader_via_beacon(timeout=10):
+async def discover_leader_via_beacon(timeout=CLIENT_SERVER_DISCOVERY_TIMEOUT):
     """Listen to beacons and extract leader info"""
     registry = ServerRegistry()
     protocol, transport = await start_beacon_listener(registry)
@@ -36,7 +43,7 @@ async def discover_leader_via_beacon(timeout=10):
     # Fallback: connect to any discovered server
     servers = registry.get_all_servers()
     if servers:
-        s = servers[0]
+        s = min(servers, key=lambda s:s.active_clients)  # choose server with least active clients
         MAIN_CLIENT_LOGGER.info(f"No leader found, connecting to server {s.server_id[:8]} at {s.host}:{s.port}")
         return s.host, s.port
     
