@@ -13,7 +13,7 @@ from election.bully_election import BullyElection
 
 
 class ServerInfo:
-    def __init__(self, server_id, host, port, ctrl_port, zone=None, last_seen=None, leaderId=None, leaderInfo=None):
+    def __init__(self, server_id, host, port, ctrl_port, zone=None, last_seen=None, leaderId=None, leaderInfo=None, active_clients=0):
         self.server_id = server_id
         self.host = host
         self.port = port
@@ -22,6 +22,7 @@ class ServerInfo:
         self.last_seen = last_seen
         self.leaderId = leaderId
         self.leaderInfo = leaderInfo
+        self.active_clients = active_clients
 
     @classmethod
     def from_beacon(cls, beacon_data, last_seen=time.time()):
@@ -35,6 +36,7 @@ class ServerInfo:
             last_seen=last_seen,
             leaderId=beacon_data.get("leader_id"),
             leaderInfo=beacon_data.get("leader_info"),
+            active_clients=beacon_data.get("active_clients", 0)
         )
 
     def update_Leader_Info(self, leaderId, leaderInfo):
@@ -53,6 +55,7 @@ class ServerInfo:
             "zone": self.zone,
             "last_seen": self.last_seen,
             "leader_id": self.leaderId,
+            "active_clients": self.active_clients,
         }
         if self.leaderInfo and not shallow_leader:
             if isinstance(self.leaderInfo, ServerInfo):
@@ -78,6 +81,7 @@ class ServerInfo:
             last_seen=data.get("last_seen"),
             leaderId=data.get("leader_id"),
             leaderInfo=data.get("leader_info"),
+            active_clients=data.get("active_clients", 0)
         )
 
     def __repr__(self):
@@ -88,7 +92,7 @@ class TCPServer:
     def __init__(self, host, port, ctrl_port, registry, heartbeat_timeout=30):
         self.registry = registry
         self.serverInfo = ServerInfo(
-            str(uuid.uuid7()), host, port, ctrl_port, last_seen=time.time(), leaderId=None
+            str(uuid.uuid7()), host, port, ctrl_port, last_seen=time.time(), leaderId=None, active_clients=0
         )
         self.heartbeat_timeout = timedelta(seconds=heartbeat_timeout)
         self.clients = {}
@@ -152,6 +156,7 @@ class TCPServer:
                     except Exception:
                         pass
                     self.log.info(f"Evicted stale client {cid}")
+                self.serverInfo.active_clients = len(self.clients)
         except asyncio.CancelledError:
             self.log.info("Cleanup task cancelled")
 
@@ -178,6 +183,7 @@ class TCPServer:
             if client_id and client_id in self.clients:
                 self.log.info(f"Client {client_id} disconnected")
                 del self.clients[client_id]
+                self.serverInfo.active_clients = len(self.clients)
             self.writer_to_client.pop(writer, None)
             writer.close()
             await writer.wait_closed()
@@ -242,7 +248,13 @@ class TCPServer:
 
             self.log.info(f"Assigning server to client {client_id} ({client_type})")
             servers = self.get_local_server_list()
-            assigned_server = next((s for s in servers), None)
+
+            def server_min_load_criteria(s):
+                load = s.get("active_clients", 0)
+                last_seen = s.get("last_seen", 0)
+                return (load, -last_seen)
+
+            assigned_server = min(servers, key=server_min_load_criteria) if servers else None
             
             if assigned_server:
                 ack_msg = ServerMessage(
@@ -290,6 +302,7 @@ class TCPServer:
     async def handle_register_client(self, client_id, client_type, writer):
         self.clients[client_id] = (None, writer, client_type, "registered", datetime.now())
         self.writer_to_client[writer] = client_id
+        self.serverInfo.active_clients = len(self.clients)
         ack = ServerMessage(self.serverInfo.server_id, "ack_register", {"client_id": client_id})
         writer.write(ack.serialize())
         await writer.drain()
