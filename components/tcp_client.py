@@ -265,8 +265,6 @@ class TCPClient:
                         ch = msvcrt.getwch()
                         if ch and ch.lower() == "c":
                             await self.send_crash_report()
-                            return
-                            return
                     await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 return
@@ -279,8 +277,6 @@ class TCPClient:
                     return
                 if line.strip().lower() == "c":
                     await self.send_crash_report()
-                    return
-                    return
         except asyncio.CancelledError:
             return
 
@@ -357,30 +353,32 @@ class TCPClient:
     async def run(self):
         await self.connect()
         listener_task = asyncio.create_task(self.listen())
+        crash_key_task = None
+        occupancy_key_task = None
+        ambulance_key_task = None
+        
+        # Start monitoring tasks based on client type
+        if self.client_type == "Car":
+            crash_key_task = asyncio.create_task(self.monitor_crash_key())
+        elif self.client_type == "Hospital":
+            occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
+        elif self.client_type == "Ambulance":
+            ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
+        
         # For demo: send periodic status updates every 5 seconds
         try:
+            occupancy_counter = 0
             while True:
                 try:
                     await self.send_heartbeat()
-                    crash_key_task = None
-                    occupancy_key_task = None
-                    ambulance_key_task = None
-                    if self.client_type == "Car":
-                        crash_key_task = asyncio.create_task(self.monitor_crash_key())
-                    elif self.client_type == "Hospital":
-                        occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
-                    elif self.client_type == "Ambulance":
-                        ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
-                    occupancy_counter = 0
-                    while True:
-                        # Send occupancy update every 10 seconds for Hospital clients
-                        if self.client_type == "Hospital":
-                            occupancy_counter += 15
-                            if occupancy_counter >= 10:
-                                await self.send_occupancy_update()
-                                occupancy_counter = 0
-                        
-                        await asyncio.sleep(15)        
+                    # Send occupancy update every 10 seconds for Hospital clients
+                    if self.client_type == "Hospital":
+                        occupancy_counter += 15
+                        if occupancy_counter >= 10:
+                            await self.send_occupancy_update()
+                            occupancy_counter = 0
+                    
+                    await asyncio.sleep(15)        
                     
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
                     self.log.error(f"Connection lost: {e}. Server may have shut down.")
@@ -391,6 +389,13 @@ class TCPClient:
                             await self.connect()
                             listener_task.cancel()
                             listener_task = asyncio.create_task(self.listen())
+                            # Restart monitoring tasks
+                            if crash_key_task and crash_key_task.done():
+                                crash_key_task = asyncio.create_task(self.monitor_crash_key())
+                            if occupancy_key_task and occupancy_key_task.done():
+                                occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
+                            if ambulance_key_task and ambulance_key_task.done():
+                                ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
                             reconnected = True
                             self.log.info("Reconnected to same Server successfully")
                             break
@@ -407,6 +412,13 @@ class TCPClient:
                             await self.connect()
                             listener_task.cancel()
                             listener_task = asyncio.create_task(self.listen())
+                            # Restart monitoring tasks
+                            if crash_key_task and crash_key_task.done():
+                                crash_key_task = asyncio.create_task(self.monitor_crash_key())
+                            if occupancy_key_task and occupancy_key_task.done():
+                                occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
+                            if ambulance_key_task and ambulance_key_task.done():
+                                ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
                             self.log.info("Connected to new assigned Server successfully")
                         except Exception as e:
                             self.log.error(f"Failed to connect to new assigned Server: {e}")

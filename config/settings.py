@@ -109,7 +109,7 @@ LEADER_MONITOR_INTERVAL = 3  # seconds between leader health checks
 REGISTRY_CLEANUP_INTERVAL = 10  # seconds between registry cleanup checks
 SERVER_STALE_TIME = 20  # seconds before a server is considered stale
 
-CLIENT_SERVER_DISCOVERY_TIMEOUT = 3  # seconds to listen for beacons
+CLIENT_SERVER_DISCOVERY_TIMEOUT = 5  # seconds to listen for beacons
 
 MAX_RETRIES = 3  # max retries for certain operations
 
