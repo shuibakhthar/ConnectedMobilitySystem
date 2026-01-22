@@ -63,23 +63,27 @@ SERVER_STATUS = [
     "ack_on_duty", "ack_answer_call", "ack_arrived_at_scene", "ack_transporting_patient", "ack_at_hospital", "ack_available",
     "ack_light_green", "ack_light_yellow", "ack_light_red",
     "ack_open", "ack_closed", "ack_occupancy_update",
-    "dispose_crash", "election_start","election_ack_ok", "election_coordinator", "heartbeat",  "request_server_assignment", "assign_server"]
-NEEDED_PAYLOADS = {
-   "election_start": ["from"],
-   "election_ack_ok": ["from"],
-    "election_coordinator": ["from"],
-    "assign_server": ["host", "port", "server_id"],
-}
+    "dispose_crash", "election_start","election_ack_ok", "election_coordinator", "dispatch_ambulance","heartbeat", "assign_patient_to_hospital", "request_server_assignment", "assign_server", "help_coming"]
 
 CLIENT_TYPES = ["Ambulance", "Car", "TrafficLight", "Hospital"]
 CLIENT_STATUS = {
-    "AllClients": ["register", "location_update", "heartbeat","request_server_assignment"],
+    "AllClients": ["register", "location_update", "heartbeat","request_server_assignment", "ack_crash_response"],
     "Ambulance": ["on_duty", "report_crash", "answer_call", "arrived_at_scene", "transporting_patient", "at_hospital", "available"],
     "Car": ["report_crash"],
     "TrafficLight": ["light_green", "light_yellow", "light_red"],
     "Hospital": ["open", "closed", "occupancy_update"]
 }
+
+# Consolidated NEEDED_PAYLOADS for all statuses (server and client)
 NEEDED_PAYLOADS = {
+    # Server statuses
+    "election_start": ["from"],
+    "election_ack_ok": ["from"],
+    "election_coordinator": ["from"],
+    "assign_server": ["host", "port", "server_id"],
+    "assign_patient_to_hospital": ["hospital_id", "car_id", "crash_location"],
+    "dispatch_ambulance": ["ambulance_id", "car_id", "crash_location", "hospital_id"],
+    # Client statuses
     "location_update": ["latitude", "longitude"],
     "report_crash": ["latitude", "longitude"],
     "answer_call": ["call_id"],

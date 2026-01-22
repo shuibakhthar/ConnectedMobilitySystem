@@ -338,17 +338,68 @@ class TCPClient:
     #    self.writer.write(msg)
     #    await self.writer.drain()
 
+    async def handle_dispatch_ambulance(self, payload):
+        """Handle ambulance dispatch order from server."""
+        self.log.info(f"DISPATCH ORDER: Head to crash at {payload.get('crash_location')}, then to hospital {payload.get('hospital_id')}")
+        # Send acknowledgement back to server
+        await self.send_crash_acknowledgement("dispatch_received", payload.get("car_id"))
+        # Change ambulance status to on_duty
+        if self.client_type == "Ambulance":
+            await self.send_ambulance_status("on_duty")
+            self.log.info("Ambulance status changed to: on_duty")
+
+    async def handle_assign_patient_to_hospital(self, payload):
+        """Handle patient assignment to hospital from server."""
+        self.log.info(f"PATIENT ASSIGNMENT: Receive patient from crash {payload.get('car_id')} at {payload.get('crash_location')}")
+        # Reduce occupancy by 1 (bed reserved for incoming patient)
+        if self.client_type == "Hospital":
+            self.current_occupancy = max(0, self.current_occupancy - 1)
+            self.log.info(f"Occupancy reduced by 1. Current occupancy: {self.current_occupancy} beds available")
+            # Send updated occupancy to server
+            await self.send_occupancy_update()
+        # Send acknowledgement back to server
+        await self.send_crash_acknowledgement("assignment_received", payload.get("car_id"))
+
+    async def send_crash_acknowledgement(self, ack_type, car_id):
+        """Send acknowledgement for dispatch or assignment back to server."""
+        ack_msg = ClientMessage(
+            self.client_id,
+            self.client_type,
+            "ack_crash_response",
+            {
+                "ack_type": ack_type,
+                "car_id": car_id,
+                "responder_id": self.client_id,
+                "responder_type": self.client_type
+            }
+        )
+        self.writer.write(ack_msg.serialize())
+        await self.writer.drain()
+        self.log.info(f"Sent {ack_type} acknowledgement for car {car_id}")
+
     async def listen(self):
         try:
             while True:
-                data = await self.reader.readline()
+                # Read fixed size buffer instead of readline, since server messages may not include newlines
+                data = await self.reader.read(4096)
                 if not data:
                     break
                 msg = deserialize_server_message(data.decode())
-                self.log.info(f"Received from server: {msg.serialize() if msg else 'None'}")
-                # print(f"Received from server: {msg}")
+                if msg:
+                    if msg.status == "dispatch_ambulance":
+                        self.log.info(f"[DISPATCH] {msg.serialize()}")
+                        await self.handle_dispatch_ambulance(msg.payload)
+                    elif msg.status == "assign_patient_to_hospital":
+                        self.log.info(f"[ASSIGN] {msg.serialize()}")
+                        await self.handle_assign_patient_to_hospital(msg.payload)
+                    else:
+                        self.log.info(f"[SERVER MSG] {msg.serialize()}")
+                else:
+                    self.log.warning(f"Failed to parse server message")
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            self.log.error(f"Listen error: {e}")
 
     async def run(self):
         await self.connect()
