@@ -18,6 +18,7 @@ def parse_args():
     p.add_argument("--client_id", type=str, default="ambulance_1")
     p.add_argument("--client_type", type=str, default="Ambulance")
     p.add_argument("--heartbeat_interval", type=int, default=15)
+    p.add_argument("--logging_level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
     return p.parse_args()
 
 
@@ -55,7 +56,7 @@ async def main():
     
     # Generate client UUID and setup file logging
     client_uuid = str(uuid.uuid7())
-    log_path = setup_client_file_logging(args.client_id, args.client_type)
+    log_path = setup_client_file_logging(args.client_id, args.client_type, args.logging_level)
     
     MAIN_CLIENT_LOGGER.info(f"Starting client {args.client_id} ({args.client_type})")
     MAIN_CLIENT_LOGGER.info(f"Logs saved to: {log_path}")

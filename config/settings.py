@@ -23,36 +23,35 @@ LOG_DIR.mkdir(exist_ok=True)
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-def setup_server_file_logging(host, port, server_id=None):
+def setup_server_file_logging(host, port, logging_level, server_id=None):
     """Setup file logging for server"""
     log_filename = f"{host}_{port}_{server_id[:8]}.log" if server_id else f"{host}_{port}.log"
     log_path = LOG_DIR / log_filename
     
     file_handler = logging.FileHandler(log_path, mode='w')
-    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
     
     # Add to all loggers
     for logger_name in ["MainServer", "TCPServer", "DiscoveryProtocol", "BullyElection"]:
         logger = logging.getLogger(logger_name)
         logger.addHandler(file_handler)
+        logger.setLevel(logging_level)
     
     return str(log_path)
 
-def setup_client_file_logging(client_id, client_type, client_uuid=None):
+def setup_client_file_logging(client_id, client_type, logging_level, client_uuid=None):
     """Setup file logging for client - attach to both MainClient and TCPClient loggers"""
     log_filename = f"{client_id}_{client_type}_{client_uuid[:8]}.log" if client_uuid else f"{client_id}_{client_type}.log"
     log_path = LOG_DIR / log_filename
     
     file_handler = logging.FileHandler(log_path, mode='w')
-    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
     
     # Add to both MainClient and TCPClient loggers
     for logger_name in ["MainClient", "TCPClient", "MainServer", "TCPServer", "DiscoveryProtocol", "BullyElection"]:
         logger = logging.getLogger(logger_name)
         logger.addHandler(file_handler)
-        logger.setLevel(logging.DEBUG)  # Ensure logger itself passes DEBUG messages
+        logger.setLevel(logging_level)  # Ensure logger itself passes DEBUG messages
     
     return str(log_path)
 
@@ -114,7 +113,7 @@ CLIENT_SERVER_DISCOVERY_TIMEOUT = 3  # seconds to listen for beacons
 MAX_RETRIES = 3  # max retries for certain operations
 
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s')
 MAIN_CLIENT_LOGGER = logging.getLogger("MainClient")
 MAIN_SERVER_LOGGER = logging.getLogger("MainServer")
 TCP_SERVER_LOGGER = logging.getLogger("TCPServer")

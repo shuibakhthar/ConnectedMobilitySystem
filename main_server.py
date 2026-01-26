@@ -1,5 +1,6 @@
 import asyncio
 import argparse
+import logging
 from components.tcp_server import TCPServer
 from discovery.discovery_protocol import ServerRegistry, BeaconServer, start_beacon_listener, cleanup_loop
 from config.settings import MAIN_SERVER_LOGGER, BEACON_PORT, setup_server_file_logging, get_local_ip
@@ -11,6 +12,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Main Server with Dynamic Discovery")
     p.add_argument("--host", type=str, default=None, help="Host IP (auto-detected if not provided)")
     p.add_argument("--tcp_port", type=int, default=8888)
+    p.add_argument("--logging_level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
     return p.parse_args()
 
 
@@ -26,8 +28,8 @@ async def main():
     server = TCPServer(host, args.tcp_port, args.tcp_port + 1, registry=registry)
 
     # Setup file logging
-    log_path = setup_server_file_logging(host, args.tcp_port)
-    
+    log_path = setup_server_file_logging(host, args.tcp_port, args.logging_level)
+
     MAIN_SERVER_LOGGER.info(
         f"Starting server {server.serverInfo.server_id[:8]} on {host}:{args.tcp_port}"
     )
