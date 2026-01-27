@@ -29,6 +29,9 @@ class TCPClient:
         self.latitude = latitude
         self.longitude = longitude
         self.current_occupancy = current_occupancy
+        self.auto_arrive_task: asyncio.Task | None = None
+        self.auto_transport_task: asyncio.Task | None = None
+        self.auto_hospital_task: asyncio.Task | None = None
 
     async def connect(self):
 
@@ -347,6 +350,10 @@ class TCPClient:
         if self.client_type == "Ambulance":
             await self.send_ambulance_status("on_duty")
             self.log.info("Ambulance status changed to: on_duty")
+            # Automatically mark arrival at scene shortly after going on duty
+            if self.auto_arrive_task and not self.auto_arrive_task.done():
+                self.auto_arrive_task.cancel()
+            self.auto_arrive_task = asyncio.create_task(self._auto_arrive_at_scene(payload))
 
     async def handle_assign_patient_to_hospital(self, payload):
         """Handle patient assignment to hospital from server."""
@@ -357,6 +364,13 @@ class TCPClient:
             self.log.info(f"Occupancy reduced by 1. Current occupancy: {self.current_occupancy} beds available")
             # Send updated occupancy to server
             await self.send_occupancy_update()
+        elif self.client_type == "Ambulance":
+            hospital_id = payload.get("hospital_id")
+            car_id = payload.get("car_id")
+            if self.auto_transport_task and not self.auto_transport_task.done():
+                self.auto_transport_task.cancel()
+            self.auto_transport_task = asyncio.create_task(self._auto_transport_to_hospital(car_id, hospital_id))
+            self.log.info(f"Hospital assigned for transport: {hospital_id} (car {car_id})")
         # Send acknowledgement back to server
         await self.send_crash_acknowledgement("assignment_received", payload.get("car_id"))
 
@@ -377,6 +391,51 @@ class TCPClient:
         await self.writer.drain()
         self.log.info(f"Sent {ack_type} acknowledgement for car {car_id}")
 
+    async def _auto_arrive_at_scene(self, payload):
+        """Transition to arrived_at_scene shortly after dispatch to keep status current."""
+        try:
+            await asyncio.sleep(2)
+            call_id = payload.get("car_id") or payload.get("call_id") or "default_call"
+            await self.send_ambulance_status("arrived_at_scene", call_id=call_id)
+            self.log.info("Ambulance status changed to: arrived_at_scene (auto after dispatch)")
+        except asyncio.CancelledError:
+            self.log.debug("Auto arrival transition cancelled")
+            raise
+        except Exception as exc:
+            self.log.error(f"Failed auto arrival transition: {exc}")
+
+    async def _auto_transport_to_hospital(self, car_id, hospital_id):
+        """After hospital assignment, quickly mark ambulance as transporting patient."""
+        try:
+            await asyncio.sleep(2)
+            await self.send_ambulance_status("transporting_patient", call_id=car_id, hospital_id=hospital_id)
+            self.log.info("Ambulance status changed to: transporting_patient (auto after hospital assignment)")
+            # Trigger auto-transition to at_hospital after sending transporting_patient
+            if self.auto_hospital_task and not self.auto_hospital_task.done():
+                self.auto_hospital_task.cancel()
+            self.auto_hospital_task = asyncio.create_task(self._auto_at_hospital(car_id, hospital_id))
+        except asyncio.CancelledError:
+            self.log.debug("Auto transport transition cancelled")
+            raise
+        except Exception as exc:
+            self.log.error(f"Failed auto transport transition: {exc}")
+
+    async def _auto_at_hospital(self, call_id, hospital_id):
+        """After transporting patient, mark ambulance as arrived at hospital."""
+        try:
+            await asyncio.sleep(2)
+            await self.send_ambulance_status("at_hospital", call_id=call_id, hospital_id=hospital_id)
+            self.log.info("Ambulance status changed to: at_hospital (auto after transporting patient)")
+            # Wait 5 seconds then change to available
+            await asyncio.sleep(5)
+            await self.send_ambulance_status("available")
+            self.log.info("Ambulance status changed to: available (auto after at_hospital)")
+        except asyncio.CancelledError:
+            self.log.debug("Auto hospital arrival transition cancelled")
+            raise
+        except Exception as exc:
+            self.log.error(f"Failed auto hospital arrival transition: {exc}")
+
     async def listen(self):
         try:
             while True:
@@ -392,6 +451,12 @@ class TCPClient:
                     elif msg.status == "assign_patient_to_hospital":
                         self.log.info(f"[ASSIGN] {msg.serialize()}")
                         await self.handle_assign_patient_to_hospital(msg.payload)
+                    elif msg.status == "ack_at_hospital" and self.client_type == "Hospital":
+                        payload = msg.payload or {}
+                        amb_id = payload.get("ambulance_id")
+                        car_id = payload.get("car_id")
+                        hosp_id = payload.get("hospital_id")
+                        self.log.info(f"AMBULANCE ARRIVED: ambulance={amb_id}, car={car_id}, hospital={hosp_id}")
                     else:
                         self.log.info(f"[SERVER MSG] {msg.serialize()}")
                 else:
@@ -403,6 +468,12 @@ class TCPClient:
 
     async def run(self):
         await self.connect()
+        
+        # Set initial status for Ambulance clients
+        if self.client_type == "Ambulance":
+            await self.send_ambulance_status("available")
+            self.log.info("Ambulance initial status set to: available")
+        
         listener_task = asyncio.create_task(self.listen())
         crash_key_task = None
         occupancy_key_task = None
@@ -490,6 +561,15 @@ class TCPClient:
             if ambulance_key_task:
                 ambulance_key_task.cancel()
                 await asyncio.gather(ambulance_key_task, return_exceptions=True)
+            if self.auto_arrive_task:
+                self.auto_arrive_task.cancel()
+                await asyncio.gather(self.auto_arrive_task, return_exceptions=True)
+            if self.auto_transport_task:
+                self.auto_transport_task.cancel()
+                await asyncio.gather(self.auto_transport_task, return_exceptions=True)
+            if self.auto_hospital_task:
+                self.auto_hospital_task.cancel()
+                await asyncio.gather(self.auto_hospital_task, return_exceptions=True)
             if self.writer:
                 try:
                     self.writer.close()

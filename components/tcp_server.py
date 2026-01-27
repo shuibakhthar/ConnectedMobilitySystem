@@ -472,9 +472,8 @@ class TCPServer:
         if (1):
             self.log.info(f"Leader processing crash {local_crash_count} reported by {client_id}")
             crash_location = {"latitude": latitude, "longitude": longitude}
-            hospital_id = await self.assign_hospital(crash_location, local_crash_count, client_id)
-            await self.assign_ambulance(crash_location, hospital_id, local_crash_count, client_id)           
-            
+            await self.assign_ambulance(crash_location, None, local_crash_count, client_id)
+
 
         ack = ServerMessage(
             self.serverInfo.server_id,
@@ -536,6 +535,69 @@ class TCPServer:
                     for key, value in payload.items():
                         self.connected_ambulances[client_id][key] = value
 
+        # Only allocate hospital bed when ambulance reaches scene
+        if status == "arrived_at_scene":
+            car_id = None
+            if payload:
+                car_id = payload.get("call_id") or payload.get("car_id")
+
+            if not car_id:
+                self.log.warning("arrived_at_scene status missing call_id/car_id; cannot assign hospital")
+            elif car_id not in self.connected_cars:
+                self.log.warning(f"Car {car_id} not tracked for hospital assignment")
+            else:
+                car_info = self.connected_cars[car_id]
+                if car_info.get("hospital_assigned"):
+                    self.log.debug(f"Hospital already assigned for car {car_id}; skipping re-assignment")
+                else:
+                    crash_location = car_info.get("crash_location")
+                    local_crash_count = car_info.get("LocalServer_CrashCount")
+                    hospital_id = await self.assign_hospital(crash_location, local_crash_count, car_id)
+                    if hospital_id:
+                        car_info["hospital_assigned"] = True
+                        car_info["hospital_id"] = hospital_id
+                        # Notify the ambulance of the assigned hospital so it can begin transport
+                        amb_writer = self.connected_ambulances.get(client_id, {}).get("writer")
+                        if amb_writer:
+                            notify_payload = {
+                                "hospital_id": hospital_id,
+                                "car_id": car_id,
+                                "crash_location": crash_location,
+                            }
+                            msg = ServerMessage(self.serverInfo.server_id, "assign_patient_to_hospital", notify_payload)
+                            amb_writer.write(msg.serialize())
+                            await amb_writer.drain()
+                            self.log.info(f"Sent hospital assignment {hospital_id} to ambulance {client_id} for car {car_id}")
+
+        # Notify hospital when ambulance arrives at hospital
+        elif status == "at_hospital":
+            hospital_id = None
+            car_id = None
+            if payload:
+                hospital_id = payload.get("hospital_id")
+                car_id = payload.get("call_id") or payload.get("car_id")
+
+            if not hospital_id or not car_id:
+                self.log.warning(f"at_hospital status missing hospital_id or car_id; hospital_id={hospital_id}, car_id={car_id}")
+            elif hospital_id in self.connected_hospitals:
+                hospital_info = self.connected_hospitals[hospital_id]
+                hospital_writer = hospital_info.get("writer")
+                if hospital_writer:
+                    arrival_payload = {
+                        "ambulance_id": client_id,
+                        "car_id": car_id,
+                        "hospital_id": hospital_id,
+                    }
+                    # Use an existing server status to avoid validation failures on clients
+                    msg = ServerMessage(self.serverInfo.server_id, "ack_at_hospital", arrival_payload)
+                    hospital_writer.write(msg.serialize())
+                    await hospital_writer.drain()
+                    self.log.info(f"Notified hospital {hospital_id} that ambulance {client_id} has arrived with patient from car {car_id}")
+                else:
+                    self.log.warning(f"No writer found to notify hospital {hospital_id}")
+            else:
+                self.log.warning(f"Hospital {hospital_id} not found in connected hospitals")
+
         ack = ServerMessage(
             self.serverInfo.server_id,
             f"ack_{status}",
@@ -575,10 +637,88 @@ class TCPServer:
         else:
             self.log.warning(f"Car {car_id} not found in clients to notify about help")
 
+    def print_all_clients(self):
+        """Print all connected clients and their statuses in a neat formatted table."""
+        print("\n" + "="*100)
+        print(f"{'CLIENT STATUS REPORT':^100}")
+        print("="*100)
+        
+        total_clients = len(self.clients)
+        print(f"\nTotal Connected Clients: {total_clients}\n")
+        
+        # Print Cars
+        print("-" * 100)
+        print(f"{'CARS':^100}")
+        print("-" * 100)
+        if self.connected_cars:
+            print(f"{'Client ID':<30} {'Status':<20} {'Latitude':<15} {'Longitude':<15} {'Registered':<20}")
+            print("-" * 100)
+            for car_id, car_info in self.connected_cars.items():
+                status = car_info.get("status", "N/A")
+                latitude = car_info.get("latitude", "N/A")
+                longitude = car_info.get("longitude", "N/A")
+                if car_id in self.clients:
+                    _, _, _, _, registered_time = self.clients[car_id]
+                    registered_str = registered_time.strftime("%Y-%m-%d %H:%M:%S") if registered_time else "N/A"
+                else:
+                    registered_str = "N/A"
+                print(f"{car_id:<30} {status:<20} {str(latitude):<15} {str(longitude):<15} {registered_str:<20}")
+        else:
+            print("No cars connected")
+        
+        # Print Ambulances
+        print("\n" + "-" * 100)
+        print(f"{'AMBULANCES':^100}")
+        print("-" * 100)
+        if self.connected_ambulances:
+            print(f"{'Ambulance ID':<30} {'Status':<20} {'Registered':<20}")
+            print("-" * 100)
+            for amb_id, amb_info in self.connected_ambulances.items():
+                status = amb_info.get("status", "N/A")
+                if amb_id in self.clients:
+                    _, _, _, _, registered_time = self.clients[amb_id]
+                    registered_str = registered_time.strftime("%Y-%m-%d %H:%M:%S") if registered_time else "N/A"
+                else:
+                    registered_str = "N/A"
+                print(f"{amb_id:<30} {status:<20} {registered_str:<20}")
+        else:
+            print("No ambulances connected")
+        
+        # Print Hospitals
+        print("\n" + "-" * 100)
+        print(f"{'HOSPITALS':^100}")
+        print("-" * 100)
+        if self.connected_hospitals:
+            print(f"{'Hospital ID':<30} {'Status':<20} {'Beds Available':<15} {'Registered':<20}")
+            print("-" * 100)
+            for hosp_id, hosp_info in self.connected_hospitals.items():
+                status = hosp_info.get("status", "N/A")
+                occupancy = hosp_info.get("current_occupancy", "N/A")
+                if hosp_id in self.clients:
+                    _, _, _, _, registered_time = self.clients[hosp_id]
+                    registered_str = registered_time.strftime("%Y-%m-%d %H:%M:%S") if registered_time else "N/A"
+                else:
+                    registered_str = "N/A"
+                print(f"{hosp_id:<30} {status:<20} {str(occupancy):<15} {registered_str:<20}")
+        else:
+            print("No hospitals connected")
+        
+        print("\n" + "="*100 + "\n")
+
+    async def periodic_status_print(self):
+        """Periodically print the status of all connected clients."""
+        try:
+            while True:
+                await asyncio.sleep(30)  # Print every 30 seconds
+                self.print_all_clients()
+        except asyncio.CancelledError:
+            self.log.info("Periodic status print task cancelled")
+
     async def start(self):
         # Start monitoring and cleanup tasks
         monitor_task = asyncio.create_task(self.monitor_leader())
         cleanup_task = asyncio.create_task(self.cleanup_task())
+        status_task = asyncio.create_task(self.periodic_status_print())
 
         server = await asyncio.start_server(
             self.handle_client, self.serverInfo.host, self.serverInfo.port
@@ -598,4 +738,5 @@ class TCPServer:
             finally:
                 monitor_task.cancel()
                 cleanup_task.cancel()
-                await asyncio.gather(monitor_task, cleanup_task, return_exceptions=True)
+                status_task.cancel()
+                await asyncio.gather(monitor_task, cleanup_task, status_task, return_exceptions=True)
