@@ -361,20 +361,32 @@ class TCPServer:
 
     async def assign_hospital(self, crash_location, local_crash_count, car_id):
         self.log.debug(f"Available hospitals {self.connected_hospitals}")
-        """Pick the first hospital, reserve a bed, and notify it."""
+        """Pick the hospital with the highest bed count, reserve a bed, and notify it."""
         if not self.connected_hospitals:
             self.log.warning("No hospitals available for assignment")
             return None
 
-        hospital_id, hospital_info = next(iter(self.connected_hospitals.items()))
-        current_occupancy = hospital_info.get("current_occupancy")
-        if current_occupancy is not None and current_occupancy <= 0:
-            self.log.warning(f"Hospital {hospital_id} has no available beds")
+        # Filter hospitals with available beds and sort by bed count (highest first)
+        hospitals_with_beds = {
+            hosp_id: hosp_info 
+            for hosp_id, hosp_info in self.connected_hospitals.items() 
+            if hosp_info.get("current_occupancy", 0) > 0
+        }
+
+        if not hospitals_with_beds:
+            self.log.warning("No hospitals with available beds")
             return None
 
-        # Reserve a bed if we track occupancy
-        if current_occupancy is not None:
-            self.connected_hospitals[hospital_id]["current_occupancy"] = current_occupancy - 1
+        # Select hospital with highest bed count
+        hospital_id, hospital_info = max(
+            hospitals_with_beds.items(), 
+            key=lambda item: item[1].get("current_occupancy", 0)
+        )
+        
+        current_occupancy = hospital_info.get("current_occupancy")
+        
+        # Reserve a bed
+        self.connected_hospitals[hospital_id]["current_occupancy"] = current_occupancy - 1
 
         writer = hospital_info.get("writer")
         if writer:
@@ -389,7 +401,7 @@ class TCPServer:
             )
             writer.write(msg.serialize())
             await writer.drain()
-            self.log.info(f"Notified hospital {hospital_id} about crash {local_crash_count}")
+            self.log.info(f"Notified hospital {hospital_id} (beds: {current_occupancy}) about crash {local_crash_count}")
         else:
             self.log.warning(f"No writer found to notify hospital {hospital_id}")
 
@@ -397,12 +409,24 @@ class TCPServer:
 
     async def assign_ambulance(self, crash_location, hospital_id, local_crash_count, car_id):
         self.log.debug(f"Available ambulances {self.connected_ambulances}")
-        """Pick the first ambulance and dispatch it to crash location with hospital destination."""
+        """Pick the first available ambulance and dispatch it to crash location with hospital destination."""
         if not self.connected_ambulances:
-            self.log.warning("No ambulances available for dispatch")
+            self.log.warning("No ambulances connected for dispatch")
             return
 
-        ambulance_id, ambulance_info = next(iter(self.connected_ambulances.items()))
+        # Filter for ambulances with "available" status
+        available_ambulances = {
+            amb_id: amb_info 
+            for amb_id, amb_info in self.connected_ambulances.items() 
+            if amb_info.get("status") == "available"
+        }
+
+        if not available_ambulances:
+            self.log.warning("No ambulances with 'available' status for dispatch")
+            return
+
+        # Pick the first available ambulance in order
+        ambulance_id, ambulance_info = next(iter(available_ambulances.items()))
         writer = ambulance_info.get("writer")
         if writer:
             payload = {
