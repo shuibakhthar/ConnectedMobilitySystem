@@ -1,6 +1,17 @@
 import json
 from config.settings import CLIENT_TYPES, CLIENT_STATUS, NEEDED_PAYLOADS
 
+'''
+ClientMessage class to handle serialization and deserialization of client messages.
+
+ClientMessage Structure:
+{
+    "client_id": str,
+    "client_type": str,  # Must be one of CLIENT_TYPES
+    "status": str,       # Must be valid for the given client_type as per CLIENT_STATUS
+    "payload": dict      # Must contain required fields as per NEEDED_PAYLOADS
+}
+'''
 class ClientMessage:
     def __init__(self, client_id, client_type, status, payload):
         self.client_id = client_id
@@ -32,7 +43,7 @@ class ClientMessage:
         }
         return (json.dumps(message) + "\n").encode('utf-8')
     
-
+# Deserialize function to create a ClientMessage object from JSON string
 def deserialize_client_message(data):
     try:
         message = json.loads(data)

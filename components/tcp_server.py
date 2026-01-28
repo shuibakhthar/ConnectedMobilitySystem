@@ -11,7 +11,20 @@ from config.settings import (
 )
 from election.bully_election import BullyElection
 
+'''
+ServerInfo class to hold server details and TCPServer class to manage TCP server operations.
 
+Attributes:
+    server_id (str): Unique identifier for the server.
+    host (str): The server's hostname or IP address.
+    port (int): The server's port number.
+    zone (str): The server's zone (deprecated).
+    ctrl_port (int): Control port for server-to-server communication.
+    last_seen (float): Timestamp of the last heartbeat received.
+    leaderId (str): ID of the current leader server.
+    leaderInfo (ServerInfo or dict): Information about the leader server.
+    active_clients (int): Number of active clients connected to the server.
+'''
 class ServerInfo:
     def __init__(self, server_id, host, port, ctrl_port, zone=None, last_seen=None, leaderId=None, leaderInfo=None, active_clients=0):
         self.server_id = server_id
@@ -39,13 +52,16 @@ class ServerInfo:
             active_clients=beacon_data.get("active_clients", 0)
         )
 
+    # Update leader information
     def update_Leader_Info(self, leaderId, leaderInfo):
         self.leaderId = leaderId
         self.leaderInfo = leaderInfo
 
+    # Get leader information
     def get_leader_Info(self):
         return {"leader_id": self.leaderId, "leader_info": self.leaderInfo}
 
+    # Convert ServerInfo to dictionary
     def to_dict(self, shallow_leader=False):
         d = {
             "server_id": self.server_id,
@@ -87,7 +103,18 @@ class ServerInfo:
     def __repr__(self):
         return f"ServerInfo(id={self.server_id}, host={self.host}, port={self.port}, zone={self.zone})"
 
+'''
+TCP Server class to manage client connections and server-to-server communication.
 
+Attributes:
+    registry: In-memory registry of servers.
+    serverInfo (ServerInfo): Information about this server.
+    heartbeat_timeout (timedelta): Timeout duration for client heartbeats.
+    clients (dict): Active clients connected to the server.
+    writer_to_client (dict): Mapping of writers to client IDs.
+    log: Logger for TCP server events.
+    election (BullyElection): Election mechanism for leader selection.
+'''
 class TCPServer:
     def __init__(self, host, port, ctrl_port, registry, heartbeat_timeout=30):
         self.registry = registry
@@ -104,10 +131,12 @@ class TCPServer:
             registry=self.registry,
         )
 
+    # Get fresh server list from in-memory registry
     def get_local_server_list(self):
         """Get fresh server list from in-memory registry"""
         return [s.to_dict() for s in self.registry.get_all_servers()]
 
+    # Check if the leader is missing or dead
     def is_leader_missing_or_dead(self):
         leader_id = self.registry.get_leader_id()
         if not leader_id:
@@ -127,6 +156,7 @@ class TCPServer:
             return True
         return False
 
+    # Monitor the leader server's status
     async def monitor_leader(self):
         try:
             while True:
@@ -137,6 +167,7 @@ class TCPServer:
         except asyncio.CancelledError:
             self.log.info("Leader monitor task cancelled")
 
+    # Cleanup stale clients
     async def cleanup_task(self):
         try:
             while True:
@@ -160,10 +191,12 @@ class TCPServer:
         except asyncio.CancelledError:
             self.log.info("Cleanup task cancelled")
 
+    # Handle incoming client connections
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info("peername")
         self.log.info(f"Connection from {addr}")
         try:
+            # Read messages from the client continuously
             while True:
                 data = await reader.readline()
                 if not data:
@@ -188,6 +221,7 @@ class TCPServer:
             writer.close()
             await writer.wait_closed()
 
+    # Handle control messages for server-to-server communication
     async def handle_ctrl_message(self, reader, writer):
         from components.server_message import deserialize_server_message
         try:
@@ -207,6 +241,7 @@ class TCPServer:
             writer.close()
             await writer.wait_closed()
 
+    # Handle client server assignment requests
     async def handle_client_assignment_request(self, client_id, client_type, writer):
         try:
             self.log.debug(f"Handling server assignment request from {client_id} ({client_type})")
@@ -282,6 +317,7 @@ class TCPServer:
             writer.close()
             await writer.wait_closed()
 
+    # Process incoming client messages
     async def process_message(self, msg, writer):
         try:
             client_type = msg.client_type
@@ -299,6 +335,7 @@ class TCPServer:
         except Exception as e:
             self.log.error(f"Error processing message: {e}")
 
+    # Register the client with the server
     async def handle_register_client(self, client_id, client_type, writer):
         self.clients[client_id] = (None, writer, client_type, "registered", datetime.now())
         self.writer_to_client[writer] = client_id
@@ -308,12 +345,14 @@ class TCPServer:
         await writer.drain()
         self.log.info(f"Registered client {client_id} ({client_type})")
 
+    # Handle heartbeat messages from clients
     async def handle_heartbeat(self, client_id):
         if client_id in self.clients:
             r, w, ct, st, _ = self.clients[client_id]
             self.clients[client_id] = (r, w, ct, st, datetime.now())
             self.log.debug(f"Heartbeat updated for {client_id}")
 
+    # Start the TCP server
     async def start(self):
         # Start monitoring and cleanup tasks
         monitor_task = asyncio.create_task(self.monitor_leader())

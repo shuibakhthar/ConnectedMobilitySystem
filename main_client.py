@@ -21,7 +21,9 @@ def parse_args():
     p.add_argument("--logging_level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
     return p.parse_args()
 
-
+'''
+Leader discovery via beacon protocol.
+'''
 async def discover_leader_via_beacon(timeout=CLIENT_SERVER_DISCOVERY_TIMEOUT):
     """Listen to beacons and extract leader info"""
     registry = ServerRegistry()
@@ -48,7 +50,22 @@ async def discover_leader_via_beacon(timeout=CLIENT_SERVER_DISCOVERY_TIMEOUT):
     MAIN_CLIENT_LOGGER.error("No servers discovered")
     return None, None
 
+'''
+Client that discovers main server via beacon protocol.
 
+Arguments:
+- discover_timeout: Time to listen for beacons (default: 10s)
+- client_id: Unique identifier for the client (default: ambulance_1)
+- client_type: Type of client (e.g., Ambulance, Hospital) (default: Ambulance)
+- heartbeat_interval: Interval for sending heartbeats to server (default: 15s)
+- logging_level: Logging level (default: INFO)
+
+Starting:
+python3.14 main_client.py
+
+Further information:
+Python3.14 is required to run this server.
+'''
 async def main():
     from components.tcp_client import TCPClient
 
@@ -58,15 +75,18 @@ async def main():
     client_uuid = str(uuid.uuid7())
     log_path = setup_client_file_logging(args.client_id, args.client_type, args.logging_level)
     
+    # Logging startup info
     MAIN_CLIENT_LOGGER.info(f"Starting client {args.client_id} ({args.client_type})")
     MAIN_CLIENT_LOGGER.info(f"Logs saved to: {log_path}")
     
     server_host, server_port = await discover_leader_via_beacon(args.discover_timeout)
     
+    # If no server discovered, exit
     if not server_host:
         MAIN_CLIENT_LOGGER.error("No server discovered.")
         return
     
+    # Start TCP client
     MAIN_CLIENT_LOGGER.info(f"Connecting to {server_host}:{server_port}")
     client = TCPClient(
         server_host,

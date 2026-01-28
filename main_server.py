@@ -7,7 +7,6 @@ from config.settings import MAIN_SERVER_LOGGER, BEACON_PORT, setup_server_file_l
 
 ''' python main_server.py --tcp_port=8000'''
 
-
 def parse_args():
     p = argparse.ArgumentParser(description="Main Server with Dynamic Discovery")
     p.add_argument("--host", type=str, default=None, help="Host IP (auto-detected if not provided)")
@@ -15,7 +14,20 @@ def parse_args():
     p.add_argument("--logging_level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
     return p.parse_args()
 
+'''
+Main server with dynamic discovery via beacon protocol.
 
+Arguments:
+- host: Host IP address (auto-detected if not provided)
+- tcp_port: TCP port for the main server (default: 8888)
+- logging_level: Logging level (default: INFO)
+
+Starting:
+python3.14 main_server.py --tcp_port=8000
+
+Further information:
+Python3.14 is required to run this server.
+'''
 async def main():
     args = parse_args()
 

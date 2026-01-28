@@ -1,9 +1,19 @@
 import json
 from config.settings import SERVER_STATUS, NEEDED_PAYLOADS
 
+'''
+ServerMessage class to handle serialization and deserialization of server messages.
+
+ServerMessage Structure:
+{
+    "server_id": str,
+    "status": str,       # Must be one of SERVER_STATUS
+    "payload": dict      # Must contain required fields as per NEEDED_PAYLOADS
+}
+'''
 class ServerMessage:
     def __init__(self, server_id, status, payload, server_zone=None):
-        self.server_zone = server_zone
+        self.server_zone = server_zone # server_zone is deprecated
         self.server_id = server_id
 
         #Server status validation
@@ -27,7 +37,7 @@ class ServerMessage:
         }
         return (json.dumps(message) + "\n").encode('utf-8')
     
-
+# Deserialize function to create a ServerMessage object from JSON string
 def deserialize_server_message(data):
     try:
         message = json.loads(data)
