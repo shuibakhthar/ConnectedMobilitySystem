@@ -7,9 +7,9 @@ from config.settings import MAIN_CLIENT_LOGGER, setup_client_file_logging, CLIEN
 
 '''
 python main_client.py --discover_timeout=10 --client_id=ambulance_1  --client_type=Ambulance --heartbeat_interval=15
-python main_client.py --discover_timeout=10 --client_id=ambulance_2  --client_type=Ambulance --heartbeat_interval=15
-python main_client.py --discover_timeout=10 --client_id=hospital_1  --client_type=Hospital --heartbeat_interval=15
-python main_client.py --discover_timeout=10 --client_id=car_1  --client_type=car --heartbeat_interval=15
+python main_client.py --discover_timeout=10 --client_id=ambulance_2  --client_type=Ambulance --heartbeat_interval=15 
+python main_client.py --discover_timeout=10 --client_id=hospital_1  --client_type=Hospital --heartbeat_interval=15 --current_occupancy=5 --latitude=37.7749 --longitude=-122.4194
+python main_client.py --discover_timeout=10 --client_id=car_1  --client_type=Car --heartbeat_interval=15
 '''
 
 def parse_args():
@@ -19,6 +19,9 @@ def parse_args():
     p.add_argument("--client_type", type=str, default="Ambulance")
     p.add_argument("--heartbeat_interval", type=int, default=15)
     p.add_argument("--logging_level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
+    p.add_argument("--latitude", type=float, default=0.0, help="Client latitude (used for crash/location)")
+    p.add_argument("--longitude", type=float, default=0.0, help="Client longitude (used for crash/location)")
+    p.add_argument("--current_occupancy", type=int, default=0, help="Number of beds available (for Hospital clients)")
     return p.parse_args()
 
 
@@ -74,6 +77,9 @@ async def main():
         client_id=args.client_id,
         client_type=args.client_type,
         heartbeat_interval=args.heartbeat_interval,
+        latitude=args.latitude,
+        longitude=args.longitude,
+        current_occupancy=args.current_occupancy,
     )
     await client.run()
 

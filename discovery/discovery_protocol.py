@@ -105,6 +105,7 @@ class BeaconServer:
                     "leader_id": self.registry.get_leader_id(),
                     "leader_info": self.registry.get_leader_info().to_dict(shallow_leader=True) if self.registry.get_leader_info() else None,
                     "active_clients": self.server_info.active_clients,
+                    "resources": self.server_info.get_resources(),
                 }
                 sock.sendto(json.dumps(msg).encode("utf-8"), broadcast_addr)
                 DISCOVERY_LOGGER.debug(

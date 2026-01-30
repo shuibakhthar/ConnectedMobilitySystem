@@ -1,12 +1,24 @@
 import asyncio
+import sys
+import uuid
+
 from components.client_message import ClientMessage
 from components.server_message import deserialize_server_message
-import uuid
 from main_client import discover_leader_via_beacon
 
 from config.settings import MAX_RETRIES, TCP_CLIENT_LOGGER
 class TCPClient:
-    def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
+    def __init__(
+        self,
+        server_host,
+        server_port,
+        client_id,
+        client_type="Car",
+        heartbeat_interval=15,
+        latitude: float = 0.0,
+        longitude: float = 0.0,
+        current_occupancy: int = 0,
+    ):
         self.server_host = server_host
         self.server_port = server_port
         self.client_id = client_id
@@ -14,6 +26,12 @@ class TCPClient:
         self.heartbeat_interval = heartbeat_interval
         self.client_uid = uuid.uuid7()
         self.log = TCP_CLIENT_LOGGER
+        self.latitude = latitude
+        self.longitude = longitude
+        self.current_occupancy = current_occupancy
+        self.auto_arrive_task: asyncio.Task | None = None
+        self.auto_transport_task: asyncio.Task | None = None
+        self.auto_hospital_task: asyncio.Task | None = None
 
     async def connect(self):
 
@@ -94,33 +112,400 @@ class TCPClient:
         self.log.debug("Heartbeat sent.")
         # print("Heartbeat sent.")
 
+    async def send_crash_report(self, latitude: float | None = None, longitude: float | None = None):
+        """Send a crash report to the server.
+
+        Note: This does not wait for an ack because `listen()` owns the reader.
+        """
+        if latitude is None:
+            latitude = self.latitude
+        if longitude is None:
+            longitude = self.longitude
+
+        crash_msg = ClientMessage(
+            self.client_id,
+            self.client_type,
+            "report_crash",
+            {"latitude": latitude, "longitude": longitude},
+        )
+        self.writer.write(crash_msg.serialize())
+        await self.writer.drain()
+        self.log.warning(f"Crash sent to server: lat={latitude}, lon={longitude}")
+
+    async def send_occupancy_update(self):
+        """Send bed occupancy information to the server (Hospital clients only)."""
+        if self.client_type != "Hospital":
+            return
+
+        occupancy_msg = ClientMessage(
+            self.client_id,
+            self.client_type,
+            "occupancy_update",
+            {"current_occupancy": self.current_occupancy},
+        )
+        self.writer.write(occupancy_msg.serialize())
+        await self.writer.drain()
+        self.log.info(f"Occupancy update sent to server: {self.current_occupancy} beds available")
+
+    async def send_ambulance_status(self, status, call_id="default_call", hospital_id="default_hospital"):
+        """Send ambulance status update to the server."""
+        if self.client_type != "Ambulance":
+            return
+        
+        # Build payload based on what the status requires
+        payload = {}
+        if status in ["answer_call", "arrived_at_scene"]:
+            payload["call_id"] = call_id
+            self.log.debug(f"Preparing ambulance status '{status}' with payload: {payload}")
+        elif status in ["transporting_patient", "at_hospital"]:
+            payload["call_id"] = call_id
+            payload["hospital_id"] = hospital_id
+            self.log.debug(f"Preparing ambulance status '{status}' with payload: {payload}")
+        else:
+            self.log.debug(f"Preparing ambulance status '{status}' with empty payload")
+        
+        try:
+            ambulance_msg = ClientMessage(
+                self.client_id,
+                self.client_type,
+                status,
+                payload,
+            )
+            self.writer.write(ambulance_msg.serialize())
+            await self.writer.drain()
+            self.log.info(f"Ambulance status sent to server: {status} with payload {payload}")
+        except ValueError as e:
+            self.log.error(f"Failed to send ambulance status '{status}': {e}")
+            self.log.error(f"Status '{status}' requires specific payload fields. Check config/settings.py for required fields.")
+
+    async def monitor_occupancy_key(self):
+        """For Hospital clients: press +/- to update beds available, or enter a number."""
+        if self.client_type != "Hospital":
+            return
+
+        self.log.info(f"Hospital controls: press '+' to increase beds available, '-' to decrease, or type a number and press Enter")
+
+        # Windows: capture single keypress without Enter for +/-
+        if sys.platform == "win32":
+            import msvcrt
+
+            try:
+                while True:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getwch()
+                        if ch == '+':
+                            self.current_occupancy += 1
+                            self.log.info(f"Beds available increased to {self.current_occupancy}")
+                            await self.send_occupancy_update()
+                        elif ch == '-':
+                            if self.current_occupancy > 0:
+                                self.current_occupancy -= 1
+                            self.log.info(f"Beds available decreased to {self.current_occupancy}")
+                            await self.send_occupancy_update()
+                        elif ch.isdigit():
+                            # Start collecting number input
+                            num_str = ch
+                            print(ch, end='', flush=True)  # Echo the first digit
+                            while True:
+                                if msvcrt.kbhit():
+                                    ch2 = msvcrt.getwch()
+                                    if ch2 == '\r':  # Enter key
+                                        print()  # New line after Enter
+                                        try:
+                                            self.current_occupancy = int(num_str)
+                                            self.log.info(f"Beds available set to {self.current_occupancy}")
+                                            await self.send_occupancy_update()
+                                        except ValueError:
+                                            self.log.warning(f"Invalid number: {num_str}")
+                                        break
+                                    elif ch2.isdigit():
+                                        num_str += ch2
+                                        print(ch2, end='', flush=True)  # Echo each digit
+                                    else:
+                                        break
+                                await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                return
+
+        # Fallback (non-Windows): requires Enter for all input
+        try:
+            while True:
+                line = await asyncio.to_thread(sys.stdin.readline)
+                if not line:
+                    return
+                line = line.strip()
+                if line == '+':
+                    self.current_occupancy += 1
+                    self.log.info(f"Beds available increased to {self.current_occupancy}")
+                    await self.send_occupancy_update()
+                elif line == '-':
+                    if self.current_occupancy > 0:
+                        self.current_occupancy -= 1
+                    self.log.info(f"Beds available decreased to {self.current_occupancy}")
+                    await self.send_occupancy_update()
+                elif line.isdigit():
+                    self.current_occupancy = int(line)
+                    self.log.info(f"Beds available set to {self.current_occupancy}")
+                    await self.send_occupancy_update()
+        except asyncio.CancelledError:
+            return
+
+    async def monitor_crash_key(self):
+        """For Car clients: pressing 'c' triggers a crash report."""
+        if self.client_type != "Car":
+            return
+
+        self.log.info("Car controls: press 'c' to report a crash")
+
+        # Windows: capture single keypress without Enter
+        if sys.platform == "win32":
+            import msvcrt
+
+            try:
+                while True:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getwch()
+                        if ch and ch.lower() == "c":
+                            await self.send_crash_report()
+                    await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                return
+
+        # Fallback (non-Windows): requires Enter
+        try:
+            while True:
+                line = await asyncio.to_thread(sys.stdin.readline)
+                if not line:
+                    return
+                if line.strip().lower() == "c":
+                    await self.send_crash_report()
+        except asyncio.CancelledError:
+            return
+
+    async def monitor_ambulance_keys(self):
+        """For Ambulance clients: press 'O' for On Duty, 'A' for Available, 'R' for Reached at scene, 'T' for Transporting patient."""
+        if self.client_type != "Ambulance":
+            return
+
+        self.log.info("Ambulance controls: press 'O' for On Duty, 'A' for Available, 'R' for Reached at scene, 'T' for Transporting patient")
+
+        # Windows: capture single keypress without Enter
+        if sys.platform == "win32":
+            import msvcrt
+
+            try:
+                while True:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getwch()
+                        if ch and ch.upper() == "O":
+                            self.log.info("Ambulance status: On Duty")
+                            await self.send_ambulance_status("on_duty")
+                        elif ch and ch.upper() == "A":
+                            self.log.info("Ambulance status: Available")
+                            await self.send_ambulance_status("available")
+                        elif ch and ch.upper() == "R":
+                            self.log.info("Ambulance status: Reached at scene")
+                            await self.send_ambulance_status("arrived_at_scene", call_id="emergency_001")
+                        elif ch and ch.upper() == "T":
+                            self.log.info("Ambulance status: Transporting patient")
+                            await self.send_ambulance_status("transporting_patient", call_id="emergency_001", hospital_id="hospital_001")
+                    await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                return
+
+        # Fallback (non-Windows): requires Enter
+        try:
+            while True:
+                line = await asyncio.to_thread(sys.stdin.readline)
+                if not line:
+                    return
+                key = line.strip().upper()
+                if key == "O":
+                    self.log.info("Ambulance status: On Duty")
+                    await self.send_ambulance_status("on_duty")
+                elif key == "A":
+                    self.log.info("Ambulance status: Available")
+                    await self.send_ambulance_status("available")
+                elif key == "R":
+                    self.log.info("Ambulance status: Reached at scene")
+                    await self.send_ambulance_status("arrived_at_scene", call_id="emergency_001")
+                elif key == "T":
+                    self.log.info("Ambulance status: Transporting patient")
+                    await self.send_ambulance_status("transporting_patient", call_id="emergency_001", hospital_id="hospital_001")
+        except asyncio.CancelledError:
+            return
+
     #async def send_status(self, status):
     #    msg = serialize_message("status_update", self.client_id, status)
     #    self.writer.write(msg)
     #    await self.writer.drain()
 
+    async def handle_dispatch_ambulance(self, payload):
+        """Handle ambulance dispatch order from server."""
+        self.log.info(f"DISPATCH ORDER: Head to crash at {payload.get('crash_location')}, then to hospital {payload.get('hospital_id')}")
+        # Send acknowledgement back to server
+        await self.send_crash_acknowledgement("dispatch_received", payload.get("car_id"))
+        # Change ambulance status to on_duty
+        if self.client_type == "Ambulance":
+            await self.send_ambulance_status("on_duty")
+            self.log.info("Ambulance status changed to: on_duty")
+            # Automatically mark arrival at scene shortly after going on duty
+            if self.auto_arrive_task and not self.auto_arrive_task.done():
+                self.auto_arrive_task.cancel()
+            self.auto_arrive_task = asyncio.create_task(self._auto_arrive_at_scene(payload))
+
+    async def handle_assign_patient_to_hospital(self, payload):
+        """Handle patient assignment to hospital from server."""
+        self.log.info(f"PATIENT ASSIGNMENT: Receive patient from crash {payload.get('car_id')} at {payload.get('crash_location')}")
+        # Reduce occupancy by 1 (bed reserved for incoming patient)
+        if self.client_type == "Hospital":
+            self.current_occupancy = max(0, self.current_occupancy - 1)
+            self.log.info(f"Occupancy reduced by 1. Current occupancy: {self.current_occupancy} beds available")
+            # Send updated occupancy to server
+            await self.send_occupancy_update()
+        elif self.client_type == "Ambulance":
+            hospital_id = payload.get("hospital_id")
+            car_id = payload.get("car_id")
+            if self.auto_transport_task and not self.auto_transport_task.done():
+                self.auto_transport_task.cancel()
+            self.auto_transport_task = asyncio.create_task(self._auto_transport_to_hospital(car_id, hospital_id))
+            self.log.info(f"Hospital assigned for transport: {hospital_id} (car {car_id})")
+        # Send acknowledgement back to server
+        await self.send_crash_acknowledgement("assignment_received", payload.get("car_id"))
+
+    async def send_crash_acknowledgement(self, ack_type, car_id):
+        """Send acknowledgement for dispatch or assignment back to server."""
+        ack_msg = ClientMessage(
+            self.client_id,
+            self.client_type,
+            "ack_crash_response",
+            {
+                "ack_type": ack_type,
+                "car_id": car_id,
+                "responder_id": self.client_id,
+                "responder_type": self.client_type
+            }
+        )
+        self.writer.write(ack_msg.serialize())
+        await self.writer.drain()
+        self.log.info(f"Sent {ack_type} acknowledgement for car {car_id}")
+
+    async def _auto_arrive_at_scene(self, payload):
+        """Transition to arrived_at_scene shortly after dispatch to keep status current."""
+        try:
+            await asyncio.sleep(2)
+            call_id = payload.get("car_id") or payload.get("call_id") or "default_call"
+            await self.send_ambulance_status("arrived_at_scene", call_id=call_id)
+            self.log.info("Ambulance status changed to: arrived_at_scene (auto after dispatch)")
+        except asyncio.CancelledError:
+            self.log.debug("Auto arrival transition cancelled")
+            raise
+        except Exception as exc:
+            self.log.error(f"Failed auto arrival transition: {exc}")
+
+    async def _auto_transport_to_hospital(self, car_id, hospital_id):
+        """After hospital assignment, quickly mark ambulance as transporting patient."""
+        try:
+            await asyncio.sleep(2)
+            await self.send_ambulance_status("transporting_patient", call_id=car_id, hospital_id=hospital_id)
+            self.log.info("Ambulance status changed to: transporting_patient (auto after hospital assignment)")
+            # Trigger auto-transition to at_hospital after sending transporting_patient
+            if self.auto_hospital_task and not self.auto_hospital_task.done():
+                self.auto_hospital_task.cancel()
+            self.auto_hospital_task = asyncio.create_task(self._auto_at_hospital(car_id, hospital_id))
+        except asyncio.CancelledError:
+            self.log.debug("Auto transport transition cancelled")
+            raise
+        except Exception as exc:
+            self.log.error(f"Failed auto transport transition: {exc}")
+
+    async def _auto_at_hospital(self, call_id, hospital_id):
+        """After transporting patient, mark ambulance as arrived at hospital."""
+        try:
+            await asyncio.sleep(2)
+            await self.send_ambulance_status("at_hospital", call_id=call_id, hospital_id=hospital_id)
+            self.log.info("Ambulance status changed to: at_hospital (auto after transporting patient)")
+            # Wait 5 seconds then change to available
+            await asyncio.sleep(5)
+            await self.send_ambulance_status("available")
+            self.log.info("Ambulance status changed to: available (auto after at_hospital)")
+        except asyncio.CancelledError:
+            self.log.debug("Auto hospital arrival transition cancelled")
+            raise
+        except Exception as exc:
+            self.log.error(f"Failed auto hospital arrival transition: {exc}")
+
     async def listen(self):
         try:
             while True:
-                data = await self.reader.readline()
+                # Read fixed size buffer instead of readline, since server messages may not include newlines
+                data = await self.reader.read(4096)
                 if not data:
                     break
                 msg = deserialize_server_message(data.decode())
-                self.log.info(f"Received from server: {msg.serialize() if msg else 'None'}")
-                # print(f"Received from server: {msg}")
+                if msg:
+                    if msg.status == "dispatch_ambulance":
+                        self.log.info(f"[DISPATCH] {msg.serialize()}")
+                        await self.handle_dispatch_ambulance(msg.payload)
+                    elif msg.status == "assign_patient_to_hospital":
+                        self.log.info(f"[ASSIGN] {msg.serialize()}")
+                        await self.handle_assign_patient_to_hospital(msg.payload)
+                    elif msg.status == "ack_at_hospital" and self.client_type == "Hospital":
+                        payload = msg.payload or {}
+                        amb_id = payload.get("ambulance_id")
+                        car_id = payload.get("car_id")
+                        hosp_id = payload.get("hospital_id")
+                        self.log.info(f"AMBULANCE ARRIVED: ambulance={amb_id}, car={car_id}, hospital={hosp_id}")
+                    else:
+                        self.log.info(f"[SERVER MSG] {msg.serialize()}")
+                else:
+                    self.log.warning(f"Failed to parse server message")
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            self.log.error(f"Listen error: {e}")
 
     async def run(self):
+        server_host, server_port = await self.request_server_assignment()
+
+        self.server_host = server_host
+        self.server_port = server_port
+        await self.connect()
+        
+        # Set initial status for Ambulance clients
+        if self.client_type == "Ambulance":
+            await self.send_ambulance_status("available")
+            self.log.info("Ambulance initial status set to: available")
+        
+        listener_task = asyncio.create_task(self.listen())
+        crash_key_task = None
+        occupancy_key_task = None
+        ambulance_key_task = None
+        
+        # Start monitoring tasks based on client type
+        if self.client_type == "Car":
+            crash_key_task = asyncio.create_task(self.monitor_crash_key())
+        elif self.client_type == "Hospital":
+            occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
+        elif self.client_type == "Ambulance":
+            ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
+        
+        # For demo: send periodic status updates every 5 seconds
         try:
-            self.server_host, self.server_port = await self.request_server_assignment()
-            await self.connect()
-            listener_task = asyncio.create_task(self.listen())
-            # For demo: send periodic status updates every 5 seconds
+            occupancy_counter = 0
             while True:
                 try:
                     await self.send_heartbeat()
-                    await asyncio.sleep(15)
+                    # Send occupancy update every 10 seconds for Hospital clients
+                    if self.client_type == "Hospital":
+                        occupancy_counter += 15
+                        if occupancy_counter >= 10:
+                            await self.send_occupancy_update()
+                            occupancy_counter = 0
+                    
+                    await asyncio.sleep(15)        
+                    
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
                     self.log.error(f"Connection lost: {e}. Server may have shut down.")
                     reconnected = False
@@ -130,6 +515,13 @@ class TCPClient:
                             await self.connect()
                             listener_task.cancel()
                             listener_task = asyncio.create_task(self.listen())
+                            # Restart monitoring tasks
+                            if crash_key_task and crash_key_task.done():
+                                crash_key_task = asyncio.create_task(self.monitor_crash_key())
+                            if occupancy_key_task and occupancy_key_task.done():
+                                occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
+                            if ambulance_key_task and ambulance_key_task.done():
+                                ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
                             reconnected = True
                             self.log.info("Reconnected to same Server successfully")
                             break
@@ -146,6 +538,13 @@ class TCPClient:
                             await self.connect()
                             listener_task.cancel()
                             listener_task = asyncio.create_task(self.listen())
+                            # Restart monitoring tasks
+                            if crash_key_task and crash_key_task.done():
+                                crash_key_task = asyncio.create_task(self.monitor_crash_key())
+                            if occupancy_key_task and occupancy_key_task.done():
+                                occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
+                            if ambulance_key_task and ambulance_key_task.done():
+                                ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
                             self.log.info("Connected to new assigned Server successfully")
                         except Exception as e:
                             self.log.error(f"Failed to connect to new assigned Server: {e}")
@@ -157,6 +556,24 @@ class TCPClient:
         finally:
             if listener_task:
                 listener_task.cancel()
+            if crash_key_task:
+                crash_key_task.cancel()
+                await asyncio.gather(crash_key_task, return_exceptions=True)
+            if occupancy_key_task:
+                occupancy_key_task.cancel()
+                await asyncio.gather(occupancy_key_task, return_exceptions=True)
+            if ambulance_key_task:
+                ambulance_key_task.cancel()
+                await asyncio.gather(ambulance_key_task, return_exceptions=True)
+            if self.auto_arrive_task:
+                self.auto_arrive_task.cancel()
+                await asyncio.gather(self.auto_arrive_task, return_exceptions=True)
+            if self.auto_transport_task:
+                self.auto_transport_task.cancel()
+                await asyncio.gather(self.auto_transport_task, return_exceptions=True)
+            if self.auto_hospital_task:
+                self.auto_hospital_task.cancel()
+                await asyncio.gather(self.auto_hospital_task, return_exceptions=True)
             if self.writer:
                 try:
                     self.writer.close()

@@ -59,33 +59,46 @@ def setup_client_file_logging(client_id, client_type, logging_level, client_uuid
 
 SERVER_STATUS = [
     "ack_register", "ack_crash", "ack_location_update",
-    "ack_answer_call", "ack_arrived_at_scene", "ack_transporting_patient", "ack_at_hospital", "ack_available",
+    "ack_on_duty", "ack_answer_call", "ack_arrived_at_scene", "ack_transporting_patient", "ack_at_hospital", "ack_available",
     "ack_light_green", "ack_light_yellow", "ack_light_red",
     "ack_open", "ack_closed", "ack_occupancy_update",
-    "dispose_crash", "election_start","election_ack_ok", "election_coordinator", "heartbeat",  "request_server_assignment", "assign_server"]
-NEEDED_PAYLOADS = {
-   "election_start": ["from"],
-   "election_ack_ok": ["from"],
-    "election_coordinator": ["from"],
-    "assign_server": ["host", "port", "server_id"],
-}
+    "dispose_crash", 
+    "election_start","election_ack_ok", "election_coordinator", 
+    "dispatch_ambulance","heartbeat", "assign_patient_to_hospital", 
+    "request_server_assignment", "assign_server", "help_coming",
+    "request_workflow", "workflow_event", "workflow_completed", "execute_command", "client_reconnected"]
 
 CLIENT_TYPES = ["Ambulance", "Car", "TrafficLight", "Hospital"]
 CLIENT_STATUS = {
-    "AllClients": ["register", "location_update", "heartbeat","request_server_assignment"],
-    "Ambulance": ["report_crash", "answer_call", "arrived_at_scene", "transporting_patient", "at_hospital", "available"],
+    "AllClients": ["register", "location_update", "heartbeat","request_server_assignment", "ack_crash_response"],
+    "Ambulance": ["on_duty", "report_crash", "answer_call", "arrived_at_scene", "transporting_patient", "at_hospital", "available"],
     "Car": ["report_crash"],
     "TrafficLight": ["light_green", "light_yellow", "light_red"],
     "Hospital": ["open", "closed", "occupancy_update"]
 }
+
+# Consolidated NEEDED_PAYLOADS for all statuses (server and client)
 NEEDED_PAYLOADS = {
+    # Server statuses
+    "election_start": ["from"],
+    "election_ack_ok": ["from"],
+    "election_coordinator": ["from"],
+    "assign_server": ["host", "port", "server_id"],
+    "assign_patient_to_hospital": ["hospital_id", "car_id", "crash_location"],
+    "dispatch_ambulance": ["ambulance_id", "car_id", "crash_location", "hospital_id"],
+    "request_workflow": ["car_id", "crash_location" ],
+    "workflow_event" : ["seq", "event_type", "workflow_id"],
+    "workflow_completed": ["workflow_id"],
+    "execute_command": ["command"],
+    "client_reconnected": ["client_id", "workflow_id"],
+    # Client statuses
     "location_update": ["latitude", "longitude"],
     "report_crash": ["latitude", "longitude"],
     "answer_call": ["call_id"],
     "arrived_at_scene": ["call_id"],
     "transporting_patient": ["call_id", "hospital_id"],
     "at_hospital": ["call_id", "hospital_id"],
-    "occupancy_update": ["current_occupancy", "max_capacity"],
+    "occupancy_update": ["current_occupancy"],
     "dispose_crash": ["crash_id", "car_client_id"]
 }
 
@@ -108,7 +121,7 @@ LEADER_MONITOR_INTERVAL = 3  # seconds between leader health checks
 REGISTRY_CLEANUP_INTERVAL = 10  # seconds between registry cleanup checks
 SERVER_STALE_TIME = 20  # seconds before a server is considered stale
 
-CLIENT_SERVER_DISCOVERY_TIMEOUT = 3  # seconds to listen for beacons
+CLIENT_SERVER_DISCOVERY_TIMEOUT = 5  # seconds to listen for beacons
 
 MAX_RETRIES = 3  # max retries for certain operations
 
