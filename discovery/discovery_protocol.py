@@ -20,6 +20,7 @@ class ServerRegistry:
         self.leader_id = None
         self.leader_info = None
         self.ttl_seconds = ttl_seconds
+        self.global_seq_counter = 0
 
     def register_server(self, beacon_msg, addr):
         server_info = ServerInfo.from_beacon(beacon_msg, last_seen=time.time())
@@ -60,6 +61,13 @@ class ServerRegistry:
                 else None
             )
 
+    def update_global_seq_counter_from_eventlog(self, event_log):
+        if event_log:
+            max_seq = max(event['seq'] for event in event_log if 'seq' in event)
+            self.global_seq_counter = max(self.global_seq_counter, max_seq)
+        else:
+            self.global_seq_counter = max(self.global_seq_counter, 0)
+            
     def cleanup_stale_servers(self):
         now = time.time()
         stale_ids = [

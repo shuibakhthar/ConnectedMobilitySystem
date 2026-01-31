@@ -1,79 +1,111 @@
-# In config/settings.py - add this near other logging setup functions
-
+# ===== EVENT ORDERING LOGGER (ADD THIS ENTIRE CLASS) =====
 import json
 from pathlib import Path
 from datetime import datetime
+from typing import List, Dict, Any
 
 class EventOrderingLogger:
-    """Logs all global events with sequence numbers for causal ordering verification"""
+    """
+    Logs all workflow events with sequence numbers and causal dependencies.
+    Each event records what must happen before it (depends_on).
+    Every server writes same events to local file for state replication verification.
+    """
     
     def __init__(self, server_id=None):
-        self.server_id = server_id
-        self.event_file = Path("logs") / f"events_{server_id[:8]}.json" if server_id else Path("logs") / "events.json"
-        self.events = []
+        self.server_id = server_id if server_id else "unknown"
+        # Single JSONL file: one event per line
+        self.event_file = Path("logs") / f"events_{self.server_id[:8]}.jsonl"
+        self.seq_counter = 0
+        self.load_existing_events()
+        # Track workflow seq numbers for dependency building
+        self.workflow_last_seq = {}  # workflow_id -> last_seq_for_that_workflow
         
-    def log_event(self, seq, event_type, workflow_id, data=None, timestamp=None):
-        """Log an event with sequence number"""
-        if timestamp is None:
-            timestamp = datetime.now().isoformat()
-            
+    def load_existing_events(self):
+        """Load existing events from file to continue seq numbering"""
+        if self.event_file.exists():
+            try:
+                with open(self.event_file, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            event = json.loads(line)
+                            self.seq_counter = max(self.seq_counter, event.get('seq', 0))
+            except Exception as e:
+                print(f"Error loading events: {e}")
+    
+    def log_event(self, sequence_counter, workflow_id, event_type, description, 
+                  depends_on=None, data=None):
+        """
+        Log a single event with causal dependency tracking
+        
+        Args:
+            workflow_id: e.g., "wf_car_1_1"
+            event_type: "request_received", "resource_found", "workflow_started", 
+                       "command_sent", "status_change", "workflow_completed"
+            description: Human readable description
+            depends_on: List of seq numbers this depends on (prerequisites)
+            data: Dict with additional context (resource_id, status, etc.)
+        """
+        self.seq_counter = sequence_counter
+        
+        # Auto-calculate depends_on from last event in this workflow
+        if depends_on is None and workflow_id in self.workflow_last_seq:
+            depends_on = [self.workflow_last_seq[workflow_id]]
+        elif depends_on is None:
+            depends_on = []
+        
         event = {
-            "seq": seq,
-            "type": event_type,
+            "seq": self.seq_counter,
             "workflow_id": workflow_id,
-            "data": data or {},
-            "timestamp": timestamp,
-            "server_id": self.server_id
+            "type": event_type,
+            "description": description,
+            "depends_on": depends_on,
+            "timestamp": datetime.now().isoformat(timespec='milliseconds'),
+            "server_id": self.server_id,
+            "data": data or {}
         }
         
-        self.events.append(event)
+        # Track this as last event in workflow
+        self.workflow_last_seq[workflow_id] = self.seq_counter
+        
+        # Write to file (append mode, one event per line)
         self._write_to_file(event)
         
+        return event
+    
     def _write_to_file(self, event):
-        """Append event to JSON file"""
+        """Append event as JSON line"""
         try:
-            # Read existing events
-            if self.event_file.exists():
-                with open(self.event_file, 'r') as f:
-                    all_events = json.load(f)
-            else:
-                all_events = []
-            
-            # Append new event
-            all_events.append(event)
-            
-            # Write back
-            with open(self.event_file, 'w') as f:
-                json.dump(all_events, f, indent=2)
+            with open(self.event_file, 'a') as f:
+                json.dump(event, f)
+                f.write('\n')
         except Exception as e:
-            print(f"Error writing event to file: {e}")
+            print(f"Error writing event: {e}")
     
     def verify_causal_ordering(self):
-        """Verify that all events are in correct sequence order"""
+        """Verify all dependencies are satisfied"""
         try:
-            with open(self.event_file, 'r') as f:
-                events = json.load(f)
+            events_by_seq = {}
+            if self.event_file.exists():
+                with open(self.event_file, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            event = json.loads(line)
+                            events_by_seq[event['seq']] = event
             
-            # Group by workflow_id
-            workflows = {}
-            for event in events:
-                wf_id = event['workflow_id']
-                if wf_id not in workflows:
-                    workflows[wf_id] = []
-                workflows[wf_id].append(event)
-            
-            # Check ordering
             violations = []
-            for wf_id, events_list in workflows.items():
-                seqs = [e['seq'] for e in events_list]
-                if seqs != sorted(seqs):
-                    violations.append(f"Workflow {wf_id}: sequences out of order {seqs}")
+            for seq, event in events_by_seq.items():
+                for dep_seq in event.get('depends_on', []):
+                    if dep_seq not in events_by_seq:
+                        violations.append(f"Event #{seq}: missing dependency #{dep_seq}")
+                    elif dep_seq >= seq:
+                        violations.append(f"Event #{seq}: depends on future event #{dep_seq}")
             
             return {
-                "total_events": len(events),
-                "total_workflows": len(workflows),
-                "violations": violations,
-                "valid": len(violations) == 0
+                "total_events": len(events_by_seq),
+                "valid": len(violations) == 0,
+                "violations": violations
             }
         except Exception as e:
             return {"error": str(e)}
+
+# ===== END EVENT ORDERING LOGGER =====
