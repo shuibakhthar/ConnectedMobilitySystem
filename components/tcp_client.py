@@ -1,10 +1,10 @@
 import asyncio
 from components.client_message import ClientMessage
 from components.server_message import deserialize_server_message
-import logging
 import uuid
+from main_client import discover_leader_via_beacon
 
-from config.settings import MAX_RETRIES
+from config.settings import MAX_RETRIES, TCP_CLIENT_LOGGER
 class TCPClient:
     def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
         self.server_host = server_host
@@ -13,13 +13,16 @@ class TCPClient:
         self.client_type = client_type
         self.heartbeat_interval = heartbeat_interval
         self.client_uid = uuid.uuid7()
-        self.log = logging.getLogger(f"TCPClient[{self.client_uid}]")
+        self.log = TCP_CLIENT_LOGGER
 
     async def connect(self):
 
-        server_host, server_port = await self.request_server_assignment()
+        # server_host, server_port = await self.request_server_assignment()
 
-        self.reader, self.writer = await asyncio.open_connection(server_host, server_port)
+        # self.server_host = server_host
+        # self.server_port = server_port
+
+        self.reader, self.writer = await asyncio.open_connection(self.server_host, self.server_port)
         await self.register()
 
     async def request_server_assignment(self, max_retries= MAX_RETRIES):
@@ -66,7 +69,7 @@ class TCPClient:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2)
                 else:
-                        raise
+                    raise
             except Exception as e:
                 self.log.error(f"Assignment attempt {attempt + 1} failed: {e}")
                 if attempt == max_retries - 1:
@@ -109,20 +112,58 @@ class TCPClient:
             pass
 
     async def run(self):
-        await self.connect()
-        listener_task = asyncio.create_task(self.listen())
-        # For demo: send periodic status updates every 5 seconds
         try:
+            self.server_host, self.server_port = await self.request_server_assignment()
+            await self.connect()
+            listener_task = asyncio.create_task(self.listen())
+            # For demo: send periodic status updates every 5 seconds
             while True:
-                await self.send_heartbeat()
-                await asyncio.sleep(15)
+                try:
+                    await self.send_heartbeat()
+                    await asyncio.sleep(15)
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
+                    self.log.error(f"Connection lost: {e}. Server may have shut down.")
+                    reconnected = False
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            self.log.info(f"Attempting to reconnect, try {attempt + 1}")
+                            await self.connect()
+                            listener_task.cancel()
+                            listener_task = asyncio.create_task(self.listen())
+                            reconnected = True
+                            self.log.info("Reconnected to same Server successfully")
+                            break
+                        except Exception as e:
+                            self.log.error(f"Reconnection attempt {attempt + 1} failed: {e}")
+                            await asyncio.sleep(1)
+
+                    if not reconnected:
+                        self.log.error("Failed to reconnect after multiple attempts. Exiting.")
+                        try:
+                            self.server_host, self.server_port = await discover_leader_via_beacon()
+                            self.log.info(f"Discovered new leader at {self.server_host}:{self.server_port}")
+                            self.server_host, self.server_port = await self.request_server_assignment()
+                            await self.connect()
+                            listener_task.cancel()
+                            listener_task = asyncio.create_task(self.listen())
+                            self.log.info("Connected to new assigned Server successfully")
+                        except Exception as e:
+                            self.log.error(f"Failed to connect to new assigned Server: {e}")
         except KeyboardInterrupt:
             self.log.info("Client shutting down")
             # print("Client shutting down")
+        except Exception as e:
+            self.log.error(f"Unexpected error in client run: {e}", exc_info=True)
         finally:
-            listener_task.cancel()
-            self.writer.close()
-            await self.writer.wait_closed()
+            if listener_task:
+                listener_task.cancel()
+            if self.writer:
+                try:
+                    self.writer.close()
+                    await self.writer.wait_closed()
+                except Exception as e:
+                    self.log.debug(f"Error closing connection: {e}")
+            self.log.info("Client connection closed")
 
 # For manual test, run this code:
 if __name__ == "__main__":
