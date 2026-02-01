@@ -186,7 +186,11 @@ class TCPServer:
                 self.serverInfo.active_clients = len(self.clients)
             self.writer_to_client.pop(writer, None)
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except ConnectionResetError:
+                self.log.warning("Connection reset by peer.")
+
 
     async def handle_ctrl_message(self, reader, writer):
         from components.server_message import deserialize_server_message
