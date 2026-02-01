@@ -1,3 +1,9 @@
+'''
+Deprecated: Use discovery/discovery_protocol.py instead.
+'''
+
+
+
 # # discovery/server_discovery.py
 # import asyncio
 # import json

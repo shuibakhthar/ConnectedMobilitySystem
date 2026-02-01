@@ -12,7 +12,9 @@ from config.settings import (
 )
 from components.tcp_server import ServerInfo
 
-
+'''
+Discovery Protocol for Server Beacons and Registry
+'''
 class ServerRegistry:
     def __init__(self, ttl_seconds=REGISTRY_CLEANUP_INTERVAL):
         self.servers = {}
@@ -21,6 +23,7 @@ class ServerRegistry:
         self.leader_info = None
         self.ttl_seconds = ttl_seconds
 
+    # Register or update server info from beacon message
     def register_server(self, beacon_msg, addr):
         server_info = ServerInfo.from_beacon(beacon_msg, last_seen=time.time())
         self.servers[server_info.server_id] = server_info
@@ -34,21 +37,27 @@ class ServerRegistry:
             if beacon_leader_info:
                 self.leader_info = ServerInfo.from_dict(beacon_leader_info)
 
+    # Get server info by ID
     def get_server(self, server_id):
         return self.servers.get(server_id)
 
+    # Get all registered servers
     def get_all_servers(self):
         return list(self.servers.values())
 
+    # Get history of all seen servers
     def get_history(self):
         return list(self.history.values())
 
+    # Get current leader ID and info
     def get_leader_id(self):
         return self.leader_id
 
+    # Get current leader info
     def get_leader_info(self):
         return self.leader_info
 
+    # Set the current leader
     def set_leader(self, server_id, server_info=None):
         self.leader_id = server_id
         self.leader_info = server_info if server_info else self.servers.get(server_id)
@@ -60,6 +69,7 @@ class ServerRegistry:
                 else None
             )
 
+    # Remove stale servers not seen within cleanup interval
     def cleanup_stale_servers(self):
         now = time.time()
         stale_ids = [
@@ -80,12 +90,15 @@ class ServerRegistry:
     def __repr__(self):
         return f"ServerRegistry(servers={self.servers})"
 
-
+'''
+Beacon Server
+'''
 class BeaconServer:
     def __init__(self, server_info, registry):
         self.server_info = server_info
         self.registry = registry
 
+    # Beacon task to broadcast server info periodically (BEACON_INTERVAL)
     async def beacon_task(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -117,13 +130,16 @@ class BeaconServer:
     async def start(self):
         await self.beacon_task()
 
-
+'''
+Beacon Listener Protocol
+'''
 class BeaconListener(asyncio.DatagramProtocol):
     def __init__(self, registry, on_server_discovered=None):
         self.registry = registry
         self.discovered_servers = set()
         self.on_server_discovered = on_server_discovered
 
+    # Handle received datagrams
     def datagram_received(self, data, addr):
         raw = data.decode("utf-8")
         try:
@@ -140,7 +156,7 @@ class BeaconListener(asyncio.DatagramProtocol):
         if raw not in self.discovered_servers:
             self.discovered_servers.add(raw)
 
-
+# Start beacon listener
 async def start_beacon_listener(registry, on_server_discovered=None):
     loop = asyncio.get_event_loop()
     
@@ -163,7 +179,7 @@ async def start_beacon_listener(registry, on_server_discovered=None):
     )
     return protocol, transport
 
-
+# Periodic cleanup task for stale servers
 async def cleanup_loop(registry):
     while True:
         await asyncio.sleep(REGISTRY_CLEANUP_INTERVAL)

@@ -3,8 +3,21 @@ from components.client_message import ClientMessage
 from components.server_message import deserialize_server_message
 import uuid
 from main_client import discover_leader_via_beacon
-
 from config.settings import MAX_RETRIES, TCP_CLIENT_LOGGER
+
+'''
+TCP Client that connects to a server, registers itself,
+sends periodic heartbeats, and listens for server messages.
+
+Attributes:
+    server_host (str): The server's hostname or IP address.
+    server_port (int): The server's port number.
+    client_id (str): Unique identifier for the client.
+    client_type (str): Type of the client (default is "Car").
+    heartbeat_interval (int): Interval in seconds for sending heartbeats (default is 15 seconds).   
+    client_uid (UUID7): Unique UUID7 for the client instance.
+    log (Logger): Logger for logging client activities.
+'''
 class TCPClient:
     def __init__(self, server_host, server_port, client_id, client_type="Car", heartbeat_interval=15):
         self.server_host = server_host
@@ -15,6 +28,7 @@ class TCPClient:
         self.client_uid = uuid.uuid7()
         self.log = TCP_CLIENT_LOGGER
 
+    # Connect to the server and register the client
     async def connect(self):
 
         # server_host, server_port = await self.request_server_assignment()
@@ -25,12 +39,14 @@ class TCPClient:
         self.reader, self.writer = await asyncio.open_connection(self.server_host, self.server_port)
         await self.register()
 
+    # Request server assignment from the leader server
     async def request_server_assignment(self, max_retries= MAX_RETRIES):
         leader_host = self.server_host
         leader_port = self.server_port
 
         for attempt in range(max_retries):
             try:
+                # Try to connect to the leader server
                 self.log.info(f"Requesting server assignment from leader at {leader_host}:{leader_port}, attempt {attempt + 1}")
                 reader, writer = await asyncio.open_connection(leader_host, leader_port)
                 request_msg = ClientMessage(self.client_id, self.client_type, "request_server_assignment",  {})
@@ -41,6 +57,7 @@ class TCPClient:
                 if not response:
                     raise ConnectionError("No response received from leader")
                 
+                # Handle the response from the server
                 response_msg = deserialize_server_message(response.decode())
                 if response_msg:
                     if response_msg.status == "assign_server":
@@ -77,6 +94,7 @@ class TCPClient:
                 await asyncio.sleep(2)
         raise ConnectionError("Failed to get server assignment after all retries")
 
+    # Register the client with the server
     async def register(self):
         reg_msg = ClientMessage(self.client_id, self.client_type, "register", {})
         #reg_msg = serialize_message("register", self.client_id, {"info": "Client registration"})
@@ -87,6 +105,7 @@ class TCPClient:
         self.log.info(f"Registration response: {resp_msg.serialize() if resp_msg else 'None'}")
         # print(f"Registration response: {resp_msg.serialize()}")
 
+    # Send a heartbeat message to the server
     async def send_heartbeat(self):
         heartbeat_msg = ClientMessage(self.client_id, self.client_type, "heartbeat", {})
         self.writer.write(heartbeat_msg.serialize())
@@ -99,6 +118,7 @@ class TCPClient:
     #    self.writer.write(msg)
     #    await self.writer.drain()
 
+    # Listen for messages from the server
     async def listen(self):
         try:
             while True:
@@ -111,6 +131,7 @@ class TCPClient:
         except asyncio.CancelledError:
             pass
 
+    # Main run loop for the client
     async def run(self):
         try:
             self.server_host, self.server_port = await self.request_server_assignment()

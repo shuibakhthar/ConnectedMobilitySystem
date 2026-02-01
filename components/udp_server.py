@@ -1,3 +1,7 @@
+'''
+Deprecated UDP server component.
+'''
+
 # import asyncio
 # from datetime import datetime
 # from components.client_message import deserialize_client_message
