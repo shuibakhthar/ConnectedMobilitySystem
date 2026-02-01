@@ -66,7 +66,7 @@ SERVER_STATUS = [
     "election_start","election_ack_ok", "election_coordinator", 
     "dispatch_ambulance","heartbeat", "assign_patient_to_hospital", 
     "request_server_assignment", "assign_server", "help_coming",
-    "request_workflow", "workflow_event", "workflow_completed", "execute_command", "client_reconnected"]
+    "request_workflow", "workflow_event","workflow_event_batch", "workflow_completed", "execute_command", "client_reconnected", "status_update_report"]
 
 CLIENT_TYPES = ["Ambulance", "Car", "TrafficLight", "Hospital"]
 CLIENT_STATUS = {
@@ -88,6 +88,8 @@ NEEDED_PAYLOADS = {
     "dispatch_ambulance": ["ambulance_id", "car_id", "crash_location", "hospital_id"],
     "request_workflow": ["car_id", "crash_location" ],
     "workflow_event" : ["seq", "event_type", "workflow_id"],
+    "workflow_event_batch": ["events"],
+    "status_update_report": ["events"],
     "workflow_completed": ["workflow_id"],
     "execute_command": ["command"],
     "client_reconnected": ["client_id", "workflow_id"],

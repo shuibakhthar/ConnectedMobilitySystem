@@ -146,6 +146,8 @@ class TCPServer:
             registry=self.registry,
         )
 
+        self.local_events_to_sequence = []
+
     def get_next_global_seq_counter(self):
         """Get max sequence number from local event log"""
         self.registry.global_seq_counter = self.registry.global_seq_counter + 1
@@ -294,25 +296,42 @@ class TCPServer:
                 if self.registry.get_leader_id() == self.serverInfo.server_id:
                     await self.leader_start_workflow(msg.payload)
             
-            elif msg.status == "workflow_event":
+            elif msg.status == "workflow_event" or msg.status == "workflow_event_batch":
                 await self.handle_global_event(msg.payload)
             
             elif msg.status == "workflow_completed":
                 if self.registry.get_leader_id() == self.serverInfo.server_id:
+                    workflow_id = msg.payload['workflow_id']
+                    next_seq = self.get_next_global_seq_counter()
                     # Leader sequences completion
-                    self.global_seq_counter += 1
+                    complete_event = self.event_ordering_logger.log_event(  
+                        sequence_counter=next_seq,
+                        workflow_id=workflow_id,
+                        event_type="workflow_completed",
+                        event_sub_type="workflow_completed",
+                        description=f"[LEADER] Workflow {workflow_id} completed",
+                        depends_on=[],
+                        data={
+                            "workflow_id": workflow_id,
+                            "ambulance_id": msg.payload.get('ambulance_id'),
+                            "timestamp": time.time()
+                        }
+                    )
                     event = {
-                        "seq": self.global_seq_counter,
+                        "seq": self.registry.global_seq_counter,
                         "event_type": "workflow_completed",
                         "workflow_id": msg.payload['workflow_id'],
                         "ambulance_id": msg.payload.get('ambulance_id'),
                         "timestamp": time.time()
                     }
-                    await self.broadcast_global_event(event)
+                    await self.broadcast_global_event([complete_event])
             
             elif msg.status == "execute_command":
                 command = msg.payload.get("command")
                 await self.execute_command(command, msg.payload)
+            elif msg.status == "status_update_report":
+                if self.registry.get_leader_id() == self.serverInfo.server_id:
+                    await self.leader_sequence_status_events(msg.payload)
         except Exception as e:
             self.log.error(f"Error handling ctrl message: {e}")
         finally:
@@ -444,12 +463,14 @@ class TCPServer:
         # 3. Create workflow event with sequence number
         next_seq = self.get_next_global_seq_counter()
         workflow_id = f"wf_{payload['car_id']}_{next_seq}"
+        events_to_broadcast = []
         
         req_seq = self.event_ordering_logger.log_event(
             sequence_counter=next_seq,
             workflow_id=workflow_id,
-            event_type="request_received",
-            description=f"[LEADER] Processing Workflow requeste for car {payload['car_id']}",
+            event_type="workflow_event",
+            event_sub_type="request_received",
+            description=f"[LEADER] Processing Workflow request for car {payload['car_id']}",
             depends_on=[],
             data={"car_id": payload['car_id'], "crash_location": payload['crash_location']}
         )
@@ -457,39 +478,56 @@ class TCPServer:
         amb_seq = self.event_ordering_logger.log_event(
             sequence_counter= self.get_next_global_seq_counter(),
             workflow_id=workflow_id,
-            event_type="resource_found",
+            event_type = "workflow_event",
+            event_sub_type="resource_found",
             description=f"[LEADER] Found ambulance {assigned_amb} on server {assigned_amb_server}",
-            depends_on=[req_seq],
+            depends_on=[req_seq.get("seq")],
             data={"resource":"ambulance", "resource_id": assigned_amb, "server": assigned_amb_server}
         )
-        hosp_seq = self.event_ordering_logger.log_event(
-            sequence_counter= self.get_next_global_seq_counter(),
-            workflow_id=workflow_id,
-            event_type="resource_found",
-            description=f"[LEADER] Found hospital {assigned_hosp} on server {assigned_hosp_server}",
-            depends_on=[req_seq],
-            data={"resource":"hospital", "resource_id": assigned_hosp, "server": assigned_hosp_server}
-        )
+        if assigned_hosp:
+            hosp_seq = self.event_ordering_logger.log_event(
+                sequence_counter= self.get_next_global_seq_counter(),
+                workflow_id=workflow_id,
+                event_type="workflow_event",
+                event_sub_type="resource_found",
+                description=f"[LEADER] Found hospital {assigned_hosp} on server {assigned_hosp_server}",
+                depends_on=[amb_seq.get("seq")],
+                data={"resource":"hospital", "resource_id": assigned_hosp, "server": assigned_hosp_server}
+            )
+        else:
+            hosp_seq = self.event_ordering_logger.log_event(
+                sequence_counter= self.get_next_global_seq_counter(),
+                workflow_id=workflow_id,
+                event_type="workflow_event",
+                event_sub_type="resource_found",
+                description=f"[LEADER] No hospital found for workflow {workflow_id}, ambulance will handle.",
+                depends_on=[amb_seq.get("seq")],
+                data={"resource":"hospital", "resource_id": assigned_hosp, "server": assigned_hosp_server}
+            )
 
         start_seq = self.event_ordering_logger.log_event(
             sequence_counter= self.get_next_global_seq_counter(),
             workflow_id=workflow_id,
             event_type="workflow_started",
+            event_sub_type="workflow_started",
             description=f"[BROADCAST] EVENT #{next_seq}: Workflow {workflow_id} started",
-            depends_on=[amb_seq, hosp_seq],
+            depends_on=[amb_seq.get("seq"), hosp_seq.get("seq")],
             data={
+                "car_id": payload['car_id'],
+                "crash_location": payload['crash_location'],
                 "ambulance_id": assigned_amb,
                 "ambulance_server": assigned_amb_server,
                 "hospital_id": assigned_hosp,
                 "hospital_server": assigned_hosp_server,
-                "global_seq": self.global_seq_counter
+                "global_seq": self.registry.global_seq_counter,
+                "timestamp": time.time()
             }
         )
 
-        self.event_log.append(req_seq, amb_seq, hosp_seq, start_seq)
+        events_to_broadcast.extend([req_seq, amb_seq, hosp_seq, start_seq])
 
         event = {
-            "seq": self.global_seq_counter,
+            "seq": self.registry.global_seq_counter,
             "event_type": "workflow_started",
             "workflow_id": workflow_id,
             "car_id": payload['car_id'],
@@ -502,15 +540,17 @@ class TCPServer:
         }
         
         # 4. Broadcast to ALL servers for state replication
-        await self.broadcast_global_event(self.event_log)
+        # await self.broadcast_global_event(self.event_log)
         
         # 5. Send execution commands to specific servers
 
         cmd_seq = self.event_ordering_logger.log_event(
+            sequence_counter= self.get_next_global_seq_counter(),
             workflow_id=workflow_id,
-            event_type="command_sent",
+            event_type="workflow_event",
+            event_sub_type="command_sent",
             description=f"[LEADER] Sending execute_command to ambulance server {assigned_amb_server} to dispatch ambulance {assigned_amb}",
-            depends_on=[start_seq],
+            depends_on=[start_seq.get("seq")],
             data={"command":"dispatch_ambulance", "ambulance_id": assigned_amb, "ambulance_server": assigned_amb_server}
         )
         await self.send_execute_command(assigned_amb_server, "dispatch_ambulance", {
@@ -523,10 +563,12 @@ class TCPServer:
         
         if assigned_hosp:
             hosp_cmd_seq = self.event_ordering_logger.log_event(
+                sequence_counter= self.get_next_global_seq_counter(),
                 workflow_id=workflow_id,
-                event_type="command_sent",
+                event_type="workflow_event",
+                event_sub_type="command_sent",
                 description=f"[LEADER] Sending execute_command to hospital server {assigned_hosp_server} to reserve bed at hospital {assigned_hosp}",
-                depends_on=[cmd_seq],
+                depends_on=[cmd_seq.get("seq")],
                 data={"command":"reserve_bed", "hospital_id": assigned_hosp, "hospital_server": assigned_hosp_server}
             )
             await self.send_execute_command(assigned_hosp_server, "reserve_bed", {
@@ -534,22 +576,58 @@ class TCPServer:
                 "hospital_id": assigned_hosp,
                 "car_id": payload['car_id']
             })
-
+        events_to_broadcast.extend([cmd_seq, hosp_cmd_seq if assigned_hosp else cmd_seq])
+        await self.broadcast_global_event(events_to_broadcast)
     
-    async def broadcast_global_event(self, event):
-        """Broadcast event to ALL servers for state replication"""
-        self.log.info(f"[BROADCAST] Event #{event['seq']}: {event['event_type']}")
+    async def leader_sequence_status_events(self, payload):
+        """LEADER ONLY: Sequence status changes reported from servers"""
+        workflow_id = payload.get('workflow_id')
+        status_events_data = payload.get('events', [])  # List of {client_id, status, description}
         
+        self.log.info(f"[LEADER] Sequencing {len(status_events_data)} status updates for workflow {workflow_id}")
+        
+        events_to_broadcast = []
+        
+        for i, status_data in enumerate(status_events_data):
+            next_seq = self.get_next_global_seq_counter()
+            
+            status_event = self.event_ordering_logger.log_event(
+                sequence_counter=next_seq,
+                workflow_id=workflow_id,
+                event_type= status_data.get("event_type", "workflow_event"),
+                event_sub_type=status_data.get("event_sub_type", "sequence_update"),
+                description=status_data.get('description', ''),
+                # depends_on=[next_seq - 1] if i > 0 else [],
+                data= status_data.get('data', {})
+            )
+            events_to_broadcast.append(status_event)
+            # self.registry.global_seq = next_seq
+        
+        # Broadcast all status changes together
+        if events_to_broadcast:
+            await self.broadcast_global_event(events_to_broadcast) 
+
+    async def broadcast_global_event(self, events):
+        """Broadcast event to ALL servers for state replication"""
+        events_list = events if isinstance(events, list) else [events]
+
+        for event in events_list:
+            self.event_log.append(event)
+            if event.get('seq',0) > self.registry.global_seq_counter:
+                self.registry.global_seq_counter = event['seq']
+
+            self.log.info(f"[BROADCAST] Event #{event['seq']}: {event['event_type']} : {event.get('event_sub_type','')} for workflow {event['workflow_id']}")
+            
         servers = [s.to_dict() for s in self.registry.get_all_servers()]
         
         for server in servers:
             if server['server_id'] == self.serverInfo.server_id:
                 # Apply locally
-                await self.handle_global_event(event)
+                await self.handle_global_event({"events": events_list})
             else:
                 # Send to remote server
                 try:
-                    msg = ServerMessage(self.serverInfo.server_id, "workflow_event", event)
+                    msg = ServerMessage(self.serverInfo.server_id, "workflow_event_batch", {"events":events_list})
                     _, w = await asyncio.open_connection(server['host'], server['ctrl_port'])
                     w.write(msg.serialize())
                     await w.drain()
@@ -559,46 +637,66 @@ class TCPServer:
                     self.log.error(f"Failed to broadcast to {server['server_id'][:8]}: {e}")
 
 
-    async def handle_global_event(self, event):
-        """ALL SERVERS: Apply event to local state (no execution, just replication)"""
-        self.event_log.append(event)
+    async def handle_global_event(self, payload):
+        if 'events' in payload:
+            events_list = payload.get('events', [])
+        else:
+            events_list = [payload]
 
-        recv_seq = self.event_ordering_logger.log_event(
-            workflow_id=event['workflow_id'],
-            event_type=event['event_type'],
-            description=f"[RECEIVE] Event #{event['seq']}: {event['event_type']} for workflow {event['workflow_id']}",
-            data=event
-        )
-        evt_type = event['event_type']
-        
-        if evt_type == "workflow_started":
-            workflow_id = event['workflow_id']
-            self.active_workflows[workflow_id] = event
-            self.log.info(f"[STATE] Workflow {workflow_id} registered in event log")
+        for event in events_list:
+            """ALL SERVERS: Apply event to local state (no execution, just replication)"""
+            if any(e['seq'] == event['seq'] for e in self.event_log):
+                self.log.debug(f"[DUPLICATE] Event #{event['seq']} already processed, skipping.")
+                continue  # Skip duplicate event
+
+            self.event_log.append(event)
+            if event.get('seq',0) > self.registry.global_seq_counter:
+                self.registry.global_seq_counter = event['seq']
+
+            recv_seq = self.event_ordering_logger.log_event(
+                sequence_counter=event['seq'],
+                workflow_id=event['workflow_id'],
+                event_type=event['event_type'],
+                description=f"[RECEIVE] Event #{event['seq']}: {event['event_type']} : {event.get('event_sub_type','')} for workflow {event['workflow_id']}",
+                data=event
+            )
+            evt_type = event['event_type']
             
-            # If we just became leader (failover), rebuild resource state
-            if self.registry.get_leader_id() == self.serverInfo.server_id:
-                self.rebuild_resource_state_from_event(event)
+            if evt_type == "workflow_started":
+                workflow_id = event['workflow_id']
+                self.active_workflows[workflow_id] = event
+                self.log.info(f"[STATE] Workflow {workflow_id} registered in event log")
                 
-        elif evt_type == "workflow_completed":
-            workflow_id = event['workflow_id']
-            
-            if workflow_id in self.active_workflows:
-                workflow = self.active_workflows[workflow_id]
-                
-                # If we are leader, release resources in global state
+                # If we just became leader (failover), rebuild resource state
                 if self.registry.get_leader_id() == self.serverInfo.server_id:
-                    amb_server = workflow.get('ambulance_server')
-                    amb_id = workflow.get('ambulance_id')
+                    self.rebuild_resource_state_from_event(event)
                     
-                    if amb_server in self.global_resources:
-                        if amb_id in self.global_resources[amb_server].get("ambulances", {}):
-                            self.global_resources[amb_server]["ambulances"][amb_id]["status"] = "available"
-                            self.log.info(f"[LEADER] Released ambulance {amb_id}")
-                self.log.debug(f"Event log before removal: {self.event_log}")
-                self.log.debug(f"Active workflows before removal: {self.active_workflows}")
-                del self.active_workflows[workflow_id]
-                self.log.info(f"[STATE] Workflow {workflow_id} completed and removed")
+            elif evt_type == "workflow_completed":
+                workflow_id = event['workflow_id']
+
+                self.log.info(f"[DEBUG] Received workflow_completed event for workflow_id: {workflow_id}")
+                self.log.info(f"[DEBUG] Current active_workflows keys: {list(self.active_workflows.keys())}")
+                self.log.info(f"[DEBUG] Full workflow_completed event: {event}")
+                
+                if workflow_id in self.active_workflows:
+                    workflow = self.active_workflows[workflow_id]
+                    
+                    # If we are leader, release resources in global state
+                    if self.registry.get_leader_id() == self.serverInfo.server_id:
+                        amb_server = workflow.get('ambulance_server')
+                        amb_id = workflow.get('ambulance_id')
+                        
+                        if amb_server in self.global_resources:
+                            if amb_id in self.global_resources[amb_server].get("ambulances", {}):
+                                self.global_resources[amb_server]["ambulances"][amb_id]["status"] = "available"
+                                self.log.info(f"[LEADER] Released ambulance {amb_id}")
+                    self.log.info(f"Event log before removal: {self.event_log}")
+                    self.log.info(f"Active workflows before removal: {self.active_workflows}")
+                    del self.active_workflows[workflow_id]
+                    self.log.info(f"[STATE] Workflow {workflow_id} completed and removed")
+                else:
+                    self.log.warning(f"[DEBUG] Workflow {workflow_id} NOT found in active_workflows")
+                    self.log.warning(f"[DEBUG] Available workflows: {list(self.active_workflows.keys())}")
     
     def rebuild_resource_state_from_event(self, event):
         """Leader failover: Reconstruct allocated resources from event log"""
@@ -963,16 +1061,31 @@ class TCPServer:
 
         workflow_id = self.connected_ambulances.get(client_id, {}).get("workflow_id")
         if workflow_id:
-            status_seq = self.event_ordering_logger.log_event(
-                workflow_id=workflow_id,
-                event_type="status_change",
-                description=f"{client_type} {client_id} status changed to {display_status}",
-                data={
+            self.log.info(f" Creating event for ambulance status update to {display_status} in workflow {workflow_id}")
+            event = {
+                "workflow_id": workflow_id,
+                "event_type":"workflow_event",
+                "event_sub_type":"status_update",
+                "description":f"{client_type} {client_id} status changed to {display_status}",
+                "data":{
                     "client_type": client_type,
                     "client_id": client_id,
                     "status": display_status
                 }
-            )
+            }
+            # status_seq = self.event_ordering_logger.log_event(
+            #     sequence_counter=self.get_next_global_seq_counter(),
+            #     workflow_id=workflow_id,
+            #     event_type="workflow_event",
+            #     event_sub_type="status_update",
+            #     description=f"{client_type} {client_id} status changed to {display_status}",
+            #     data={
+            #         "client_type": client_type,
+            #         "client_id": client_id,
+            #         "status": display_status
+            #     }
+            # )
+            self.local_events_to_sequence.append(event)
 
 
         # Update client status if registered
@@ -989,44 +1102,57 @@ class TCPServer:
                         self.connected_ambulances[client_id][key] = value
         if status == "available":
             # Check if this ambulance was in a workflow
-            # workflow_id = self.connected_ambulances.get(client_id, {}).get("workflow_id")
+            workflow_id = self.connected_ambulances.get(client_id, {}).get("workflow_id")
             
             if workflow_id and workflow_id in self.active_workflows:
                 self.log.info(f"[WORKFLOW] Ambulance {client_id} completed workflow {workflow_id}")
-                comp_seq = self.event_ordering_logger.log_event(
-                    workflow_id=workflow_id,
-                    event_type="workflow_completed",
-                    description=f"[BROADCAST] Event #{self.global_seq_counter}: workflow_completed for workflow {workflow_id} by ambulance {client_id}",
-                    depends_on=[status_seq],
-                    data={
-                        "workflow_id": workflow_id
-                    }
-                )
                 
                 # Clear local workflow tracking
                 self.connected_ambulances[client_id]["workflow_id"] = None
                 self.connected_ambulances[client_id]["assigned_hospital"] = None
                 
                 # Notify leader of completion
-                leader_id = self.registry.get_leader_id()
+                # leader_id = self.registry.get_leader_id()
                 
-                if leader_id == self.serverInfo.server_id:
-                    # We are leader - sequence and broadcast
-                    self.global_seq_counter += 1
-                    event = {
-                        "seq": self.global_seq_counter,
-                        "event_type": "workflow_completed",
-                        "workflow_id": workflow_id,
-                        "ambulance_id": client_id,
-                        "timestamp": time.time()
-                    }
-                    await self.broadcast_global_event(event)
-                else:
-                    # Send to leader
-                    await self.send_message_to_server(leader_id, "workflow_completed", {
+                # if leader_id == self.serverInfo.server_id:
+                #     # We are leader - sequence and broadcast
+                #     nxt_seq = self.get_next_global_seq_counter()
+                #     comp_seq = self.event_ordering_logger.log_event(
+                #         sequence_counter=nxt_seq,
+                #         workflow_id=workflow_id,
+                #         event_type="workflow_completed",
+                #         event_sub_type="workflow_completed",
+                #         description=f"[BROADCAST] Event #{nxt_seq}: workflow_completed for workflow {workflow_id} by ambulance {client_id}",
+                #         depends_on=[status_seq.get("seq")] if status_seq else [],
+                #         data={
+                #             "workflow_id": workflow_id
+                #         }
+                #     )
+                #     event = {
+                #         "seq": nxt_seq,
+                #         "event_type": "workflow_completed",
+                #         "workflow_id": workflow_id,
+                #         "ambulance_id": client_id,
+                #         "timestamp": time.time()
+                #     }
+                #     events_to_sequence.append(comp_seq)
+                # else:
+                #     # Send to leader
+                #     await self.send_message_to_server(leader_id, "workflow_completed", {
+                #         "workflow_id": workflow_id,
+                #         "ambulance_id": client_id
+                #     })
+                event = {
+                    "workflow_id": workflow_id,
+                    "event_type":"workflow_completed",
+                    "event_sub_type":"workflow_completed",
+                    "description":f"Workflow {workflow_id} completed by ambulance {client_id}",
+                    "data":{
                         "workflow_id": workflow_id,
                         "ambulance_id": client_id
-                    })
+                    }
+                }
+                self.local_events_to_sequence.append(event)
 
         # Only allocate hospital bed when ambulance reaches scene
         if status == "arrived_at_scene":
@@ -1075,6 +1201,20 @@ class TCPServer:
                     self.log.warning(f"No writer found to notify hospital {hospital_id}")
             else:
                 self.log.warning(f"Hospital {hospital_id} not found in connected hospitals")
+        if self.local_events_to_sequence:
+            # open connection to leader and send events for sequencing
+            leader_id = self.registry.get_leader_id()
+            if leader_id == self.serverInfo.server_id:
+                await self.leader_sequence_status_events({
+                    "workflow_id": workflow_id,
+                    "events": self.local_events_to_sequence
+                })
+            else:
+                await self.send_message_to_server(leader_id, "status_update_report", {
+                    "workflow_id": workflow_id,
+                    "events": self.local_events_to_sequence
+                })
+                self.local_events_to_sequence = []
 
         ack = ServerMessage(
             self.serverInfo.server_id,
@@ -1187,7 +1327,9 @@ class TCPServer:
         """Periodically print the status of all connected clients."""
         try:
             while True:
-                await asyncio.sleep(30)  # Print every 30 seconds
+                await asyncio.sleep(20)  # Print every 30 seconds
+                self.log.info(f"Event log print: {self.event_log}")
+                self.log.info(f"Active workflows print: {self.active_workflows}")
                 self.print_all_clients()
         except asyncio.CancelledError:
             self.log.info("Periodic status print task cancelled")

@@ -14,7 +14,12 @@ class EventOrderingLogger:
     def __init__(self, server_id=None):
         self.server_id = server_id if server_id else "unknown"
         # Single JSONL file: one event per line
-        self.event_file = Path("logs") / f"events_{self.server_id[:8]}.jsonl"
+        # self.event_file = Path("logs") / f"events_{self.server_id[:8]}.jsonl"
+        
+        self.event_file = Path("logs") / f"events.jsonl"
+        if self.event_file.exists():
+            self.event_file.unlink()
+        
         self.seq_counter = 0
         self.load_existing_events()
         # Track workflow seq numbers for dependency building
@@ -33,7 +38,7 @@ class EventOrderingLogger:
                 print(f"Error loading events: {e}")
     
     def log_event(self, sequence_counter, workflow_id, event_type, description, 
-                  depends_on=None, data=None):
+                  depends_on=None, data=None, event_sub_type=None):
         """
         Log a single event with causal dependency tracking
         
@@ -56,7 +61,8 @@ class EventOrderingLogger:
         event = {
             "seq": self.seq_counter,
             "workflow_id": workflow_id,
-            "type": event_type,
+            "event_type": event_type,
+            "event_sub_type": event_sub_type,
             "description": description,
             "depends_on": depends_on,
             "timestamp": datetime.now().isoformat(timespec='milliseconds'),
