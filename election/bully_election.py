@@ -58,6 +58,8 @@ class BullyElection:
             if node['server_id'] != self.serverInfo.server_id:
                 await self.send_message(node, "election_coordinator", {"from": self.serverInfo.server_id})
         
+        if hasattr(self.serverInfo, 'server_ref') and self.serverInfo.server_ref:
+            await self.serverInfo.server_ref.on_became_leader()
         self.log.info(f"I am the new coordinator: {self.serverInfo.server_id}")
 
     async def handle_coordinator_message(self, from_id):

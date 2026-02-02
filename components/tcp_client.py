@@ -523,7 +523,10 @@ class TCPClient:
                             if ambulance_key_task and ambulance_key_task.done():
                                 ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
                             reconnected = True
-                            self.log.info("Reconnected to same Server successfully")
+                            # if self.client_type == "Ambulance":
+                            #     await self.send_ambulance_status("available")
+                            #     self.log.info("Ambulance initial status set to: available")
+                            # self.log.info("Reconnected to same Server successfully")
                             break
                         except Exception as e:
                             self.log.error(f"Reconnection attempt {attempt + 1} failed: {e}")
@@ -545,6 +548,9 @@ class TCPClient:
                                 occupancy_key_task = asyncio.create_task(self.monitor_occupancy_key())
                             if ambulance_key_task and ambulance_key_task.done():
                                 ambulance_key_task = asyncio.create_task(self.monitor_ambulance_keys())
+                            # if self.client_type == "Ambulance":
+                            #     await self.send_ambulance_status("available")
+                            #     self.log.info("Ambulance initial status set to: available")
                             self.log.info("Connected to new assigned Server successfully")
                         except Exception as e:
                             self.log.error(f"Failed to connect to new assigned Server: {e}")

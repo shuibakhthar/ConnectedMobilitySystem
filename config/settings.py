@@ -62,11 +62,11 @@ SERVER_STATUS = [
     "ack_on_duty", "ack_answer_call", "ack_arrived_at_scene", "ack_transporting_patient", "ack_at_hospital", "ack_available",
     "ack_light_green", "ack_light_yellow", "ack_light_red",
     "ack_open", "ack_closed", "ack_occupancy_update",
-    "dispose_crash", 
+    "dispose_crash", "client_reconnected",
     "election_start","election_ack_ok", "election_coordinator", 
     "dispatch_ambulance","heartbeat", "assign_patient_to_hospital", 
     "request_server_assignment", "assign_server", "help_coming",
-    "request_workflow", "workflow_event","workflow_event_batch", "workflow_completed", "execute_command", "client_reconnected", "status_update_report"]
+    "request_workflow", "workflow_event","workflow_event_batch", "workflow_completed", "execute_command", "client_reconnected", "status_update_report", "request_buffered_events"]
 
 CLIENT_TYPES = ["Ambulance", "Car", "TrafficLight", "Hospital"]
 CLIENT_STATUS = {
@@ -120,9 +120,10 @@ GLOBAL_ELECTION_TIMEOUT = 5  # seconds for global server election
 LEADER_HEARTBEAT_TIMEOUT = 15  # seconds to wait for leader heartbeat before triggering election
 LEADER_MONITOR_INTERVAL = 3  # seconds between leader health checks
 
-REGISTRY_CLEANUP_INTERVAL = 10  # seconds between registry cleanup checks
+REGISTRY_CLEANUP_INTERVAL = 7  # seconds between registry cleanup checks
 SERVER_STALE_TIME = 20  # seconds before a server is considered stale
 
+RETRY_BUFFERED_EVENTS_INTERVAL = 10  # seconds between retries to send buffered events to leader
 CLIENT_SERVER_DISCOVERY_TIMEOUT = 5  # seconds to listen for beacons
 
 MAX_RETRIES = 3  # max retries for certain operations

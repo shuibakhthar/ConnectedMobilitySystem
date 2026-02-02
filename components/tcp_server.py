@@ -8,6 +8,7 @@ from config.settings import (
     LEADER_MONITOR_INTERVAL,
     LEADER_HEARTBEAT_TIMEOUT,
     TCP_SERVER_LOGGER,
+    RETRY_BUFFERED_EVENTS_INTERVAL,
 )
 from config.events_logging import EventOrderingLogger
 from election.bully_election import BullyElection
@@ -185,6 +186,8 @@ class TCPServer:
                     await self.election.start_election()
         except asyncio.CancelledError:
             self.log.info("Leader monitor task cancelled")
+        except Exception as e:
+            self.log.error(f"Error in leader monitor task: {e}")
 
     async def cleanup_task(self):
         try:
@@ -218,6 +221,17 @@ class TCPServer:
         except asyncio.CancelledError:
             self.log.info("Cleanup task cancelled")
 
+    async def periodic_retry_buffered_events(self):
+        try:
+            while True:
+                await asyncio.sleep(RETRY_BUFFERED_EVENTS_INTERVAL)
+                leader_id = self.registry.get_leader_id()  # Retry every 10 seconds
+                if self.local_events_to_sequence and leader_id and leader_id != self.serverInfo.server_id:
+                    self.log.info(f"Retrying to send {len(self.local_events_to_sequence)} buffered events to leader")
+                    await self.send_buffered_events_to_leader(leader_id=leader_id)
+        except asyncio.CancelledError:
+            self.log.info("Periodic retry of buffered events task cancelled")
+
     async def update_global_resources_from_beacons(self):
         """Leader: Continuously update global resource map from beacon registry"""
         try:
@@ -239,6 +253,139 @@ class TCPServer:
                 
         except asyncio.CancelledError:
             self.log.info("Global resource update task cancelled")
+
+    async def on_became_leader(self):
+        """Called when this server becomes the new leader via election"""
+        self.log.debug("=" * 60)
+        self.log.debug(f"[LEADER TAKEOVER] Server {self.serverInfo.server_id[:8]} became leader")
+        self.log.debug("=" * 60)
+
+        # Step 0: Request buffered events from other servers
+        await self.request_buffered_events_from_servers()
+
+        if self.local_events_to_sequence:
+            self.log.info(f"[LEADER TAKEOVER] There are {len(self.local_events_to_sequence)} local buffered events to sequence")
+            events_by_workflow = {}
+            for event in self.local_events_to_sequence:
+                wf_id = event['workflow_id']
+                if wf_id not in events_by_workflow:
+                    events_by_workflow[wf_id] = []
+                events_by_workflow[wf_id].append(event)
+            for wf_id, events in events_by_workflow.items():
+                await self.leader_sequence_status_events({
+                    "workflow_id": wf_id,
+                    "events": events
+                })
+            self.local_events_to_sequence = []  # Clear after sequencing
+            self.log.info(f"[LEADER TAKEOVER] Cleared local buffered events after sequencing")
+        
+        # Step 1: Rebuild resource state from ALL active workflows
+        self.log.info(f"[LEADER TAKEOVER] Rebuilding resources from {len(self.active_workflows)} active workflows")
+        for wf_id, workflow in self.active_workflows.items():
+            # Check if already completed
+            completed = any(
+                e['workflow_id'] == wf_id and e['event_type'] == 'workflow_completed'
+                for e in self.event_log
+            )
+            if not completed:
+                self.rebuild_resource_state_from_event(workflow)
+                self.log.info(f"[LEADER TAKEOVER] Rebuilt resources for workflow {wf_id}")
+        
+        # Step 2: Check for workflows that need completion events
+        await self.detect_completed_workflows()
+        
+        self.log.info(f"[LEADER TAKEOVER] Takeover complete. Managing {len(self.active_workflows)} active workflows")
+
+    async def request_buffered_events_from_servers(self):
+        """Request any buffered global events from other servers after becoming leader"""
+        self.log.info(f"[LEADER] Requesting buffered events from other servers")
+        servers = [s.to_dict() for s in self.registry.get_all_servers()]
+        for server in servers:
+            if server['server_id'] != self.serverInfo.server_id:
+                try:
+                    reader, writer = await asyncio.open_connection(server['host'], server['ctrl_port'])
+                    msg = ServerMessage(
+                        server_id=self.serverInfo.server_id,
+                        status="request_buffered_events",
+                        payload={}
+                    )
+                    writer.write(msg.serialize())
+                    await writer.drain()
+                    writer.close()
+                    await writer.wait_closed()
+                    self.log.debug(f"[LEADER] Requested buffered events from server {server['server_id'][:8]}")
+                except Exception as e:
+                    self.log.error(f"[LEADER] Failed to request buffered events from server {server['server_id'][:8]}: {e}")
+
+    async def detect_completed_workflows(self):
+        """Check if any ambulances are available but workflows not marked complete"""
+        for wf_id, workflow in list(self.active_workflows.items()):
+            # Skip if already has completion event
+            completed = any(
+                e['workflow_id'] == wf_id and e['event_type'] == 'workflow_completed'
+                for e in self.event_log
+            )
+            if completed:
+                continue
+            
+            # Check ambulance status
+            amb_id = workflow.get('data', {}).get('ambulance_id')
+            if amb_id in self.connected_ambulances:
+                amb_status = self.connected_ambulances[amb_id].get('status')
+                
+                if amb_status == 'available':
+                    # Ambulance finished but completion event was lost
+                    self.log.warning(f"[RECOVERY] Workflow {wf_id}: ambulance {amb_id} is available but workflow not completed")
+                    self.log.warning(f"[RECOVERY] Creating missing completion event for workflow {wf_id}")
+                    
+                    next_seq = self.get_next_global_seq_counter()
+                    complete_event = self.event_ordering_logger.log_event(
+                        sequence_counter=next_seq,
+                        workflow_id=wf_id,
+                        event_type="workflow_completed",
+                        event_sub_type="workflow_completed",
+                        description=f"[RECOVERY] Workflow {wf_id} completed (detected on leader takeover)",
+                        depends_on=[],
+                        data={
+                            "workflow_id": wf_id,
+                            "ambulance_id": amb_id,
+                            "timestamp": time.time(),
+                            "recovery": True
+                        }
+                    )
+                    
+                    event = {
+                        "seq": next_seq,
+                        "event_type": "workflow_completed",
+                        "workflow_id": wf_id,
+                        "ambulance_id": amb_id,
+                        "timestamp": time.time()
+                    }
+                    
+                    await self.broadcast_global_event([complete_event])
+                    self.log.debug(f"[RECOVERY] Broadcast completion event for workflow {wf_id}")
+
+    async def send_buffered_events_to_leader(self, leader_id=None, leader_info=None):
+        """Send buffered global events to current leader"""
+        leader_id = self.registry.get_leader_id() if leader_id is None else leader_id
+        if self.local_events_to_sequence:
+            events_by_workflow = {}
+            for event in self.local_events_to_sequence:
+                wf_id = event['workflow_id']
+                if wf_id not in events_by_workflow:
+                    events_by_workflow[wf_id] = []
+                events_by_workflow[wf_id].append(event)
+            try:
+                for wf_id, events in events_by_workflow.items():
+                        await self.send_message_to_server(leader_id, "status_update_report", {
+                            "workflow_id": wf_id,
+                            "events": events
+                        })
+                        self.log.info(f"[BUFFER RECOVERY] Sent {len(events)} buffered events for workflow {wf_id} to leader {leader_id[:8]}")
+            except Exception as e:
+                self.log.error(f"[BUFFER RECOVERY] Failed to send buffered events for workflow {wf_id} to leader {leader_id[:8]}: {e}")
+            self.local_events_to_sequence =[]  # Clear after sending
+            self.log.info(f"[BUFFER RECOVERY] Cleared local buffered events after sending to leader {leader_id[:8]}")
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info("peername")
@@ -313,7 +460,7 @@ class TCPServer:
                         depends_on=[],
                         data={
                             "workflow_id": workflow_id,
-                            "ambulance_id": msg.payload.get('ambulance_id'),
+                            "ambulance_id": msg.payload.get('data', {}).get('ambulance_id'),
                             "timestamp": time.time()
                         }
                     )
@@ -321,7 +468,7 @@ class TCPServer:
                         "seq": self.registry.global_seq_counter,
                         "event_type": "workflow_completed",
                         "workflow_id": msg.payload['workflow_id'],
-                        "ambulance_id": msg.payload.get('ambulance_id'),
+                        "ambulance_id": msg.payload.get('data', {}).get('ambulance_id'),
                         "timestamp": time.time()
                     }
                     await self.broadcast_global_event([complete_event])
@@ -332,6 +479,20 @@ class TCPServer:
             elif msg.status == "status_update_report":
                 if self.registry.get_leader_id() == self.serverInfo.server_id:
                     await self.leader_sequence_status_events(msg.payload)
+            elif msg.status == "request_buffered_events":
+                await self.send_buffered_events_to_leader(msg.server_id)
+            elif msg.status == "client_reconnected":
+                # Leader: client reconnected to different server
+                if self.registry.get_leader_id() == self.serverInfo.server_id:
+                    client_id = msg.payload.get('client_id')
+                    workflow_id = msg.payload.get('workflow_id')
+                    new_server_id = msg.payload.get('server_id')
+                    
+                    self.log.info(f"[LEADER] Client {client_id} reconnected to server {new_server_id[:8]} (workflow {workflow_id})")
+                    
+                    # Check if workflow needs completion
+                    if workflow_id in self.active_workflows:
+                        await self.detect_completed_workflows()
         except Exception as e:
             self.log.error(f"Error handling ctrl message: {e}")
         finally:
@@ -612,7 +773,7 @@ class TCPServer:
         events_list = events if isinstance(events, list) else [events]
 
         for event in events_list:
-            self.event_log.append(event)
+            # self.event_log.append(event)
             if event.get('seq',0) > self.registry.global_seq_counter:
                 self.registry.global_seq_counter = event['seq']
 
@@ -653,13 +814,13 @@ class TCPServer:
             if event.get('seq',0) > self.registry.global_seq_counter:
                 self.registry.global_seq_counter = event['seq']
 
-            recv_seq = self.event_ordering_logger.log_event(
-                sequence_counter=event['seq'],
-                workflow_id=event['workflow_id'],
-                event_type=event['event_type'],
-                description=f"[RECEIVE] Event #{event['seq']}: {event['event_type']} : {event.get('event_sub_type','')} for workflow {event['workflow_id']}",
-                data=event
-            )
+            # recv_seq = self.event_ordering_logger.log_event(
+            #     sequence_counter=event['seq'],
+            #     workflow_id=event['workflow_id'],
+            #     event_type=event['event_type'],
+            #     description=f"[RECEIVE] Event #{event['seq']}: {event['event_type']} : {event.get('event_sub_type','')} for workflow {event['workflow_id']}",
+            #     data=event
+            # )
             evt_type = event['event_type']
             
             if evt_type == "workflow_started":
@@ -674,24 +835,25 @@ class TCPServer:
             elif evt_type == "workflow_completed":
                 workflow_id = event['workflow_id']
 
-                self.log.info(f"[DEBUG] Received workflow_completed event for workflow_id: {workflow_id}")
-                self.log.info(f"[DEBUG] Current active_workflows keys: {list(self.active_workflows.keys())}")
-                self.log.info(f"[DEBUG] Full workflow_completed event: {event}")
+                self.log.debug(f"[DEBUG] Received workflow_completed event for workflow_id: {workflow_id}")
+                self.log.debug(f"[DEBUG] Current active_workflows keys: {list(self.active_workflows.keys())}")
+                self.log.debug(f"[DEBUG] Full workflow_completed event: {event}")
                 
                 if workflow_id in self.active_workflows:
                     workflow = self.active_workflows[workflow_id]
                     
                     # If we are leader, release resources in global state
                     if self.registry.get_leader_id() == self.serverInfo.server_id:
-                        amb_server = workflow.get('ambulance_server')
-                        amb_id = workflow.get('ambulance_id')
+                        workflow_data = workflow.get('data', {})
+                        amb_server = workflow_data.get('ambulance_server')
+                        amb_id = workflow_data.get('ambulance_id')
                         
                         if amb_server in self.global_resources:
                             if amb_id in self.global_resources[amb_server].get("ambulances", {}):
                                 self.global_resources[amb_server]["ambulances"][amb_id]["status"] = "available"
                                 self.log.info(f"[LEADER] Released ambulance {amb_id}")
-                    self.log.info(f"Event log before removal: {self.event_log}")
-                    self.log.info(f"Active workflows before removal: {self.active_workflows}")
+                    self.log.debug(f"Event log before removal: {self.event_log}")
+                    self.log.debug(f"Active workflows before removal: {self.active_workflows}")
                     del self.active_workflows[workflow_id]
                     self.log.info(f"[STATE] Workflow {workflow_id} completed and removed")
                 else:
@@ -700,10 +862,11 @@ class TCPServer:
     
     def rebuild_resource_state_from_event(self, event):
         """Leader failover: Reconstruct allocated resources from event log"""
-        amb_server = event.get('ambulance_server')
-        amb_id = event.get('ambulance_id')
-        hosp_server = event.get('hospital_server')
-        hosp_id = event.get('hospital_id')
+        event_data = event.get('data', {})
+        amb_server = event_data.get('ambulance_server')
+        amb_id = event_data.get('ambulance_id')
+        hosp_server = event_data.get('hospital_server')
+        hosp_id = event_data.get('hospital_id')
         
         # Mark ambulance as allocated
         if amb_server and amb_id:
@@ -840,16 +1003,22 @@ class TCPServer:
             "client_id": client_id
         }
         recovered_workflow = None
+        self.log.info(f"[RECOVERY DEBUG] Checking {len(self.active_workflows)} workflows for client {client_id}")
         for wf_id, workflow in self.active_workflows.items():
+            workflow_data = workflow.get('data', {})
+            amb_id = workflow_data.get('ambulance_id')
+            car_id = workflow_data.get('car_id')
+            self.log.info(f"[RECOVERY DEBUG] Workflow {wf_id}: amb_id={amb_id} (type={type(amb_id).__name__}), car_id={car_id}")
+            self.log.info(f"[RECOVERY DEBUG] Comparing ambulance: '{amb_id}' == '{client_id}' ? {amb_id == client_id}")
             # Check if this client is part of an active workflow
-            if workflow.get('ambulance_id') == client_id:
+            if workflow_data.get('ambulance_id') == client_id:
                 self.log.info(f"[RECOVERY] Ambulance {client_id} reconnected during workflow {wf_id}")
                 recovered_workflow = workflow
                 client_info["workflow_id"] = wf_id
-                client_info["assigned_hospital"] = workflow.get('hospital_id')
+                client_info["assigned_hospital"] = workflow_data.get('hospital_id')
                 client_info["status"] = "reconnected"
                 break
-            elif workflow.get('car_id') == client_id:
+            elif workflow_data.get('car_id') == client_id:
                 self.log.info(f"[RECOVERY] Car {client_id} reconnected during workflow {wf_id}")
                 recovered_workflow = workflow
                 break
@@ -870,15 +1039,29 @@ class TCPServer:
         # NEW: If recovered, send workflow context to client
         if recovered_workflow and client_type == "Ambulance":
             # Resend dispatch info
+            workflow_data = recovered_workflow.get('data', {})
             dispatch_msg = ServerMessage(self.serverInfo.server_id, "dispatch_ambulance", {
                 "ambulance_id": client_id,
-                "car_id": recovered_workflow['car_id'],
-                "crash_location": recovered_workflow['crash_location'],
-                "hospital_id": recovered_workflow.get('hospital_id')
+                "car_id": workflow_data.get('car_id'),
+                "crash_location": workflow_data.get('crash_location'),
+                "hospital_id": workflow_data.get('hospital_id')
             })
             writer.write(dispatch_msg.serialize())
             await writer.drain()
             self.log.info(f"[RECOVERY] Resent dispatch to ambulance {client_id}")
+        
+        # # Notify leader that client reconnected (in case leader changed)
+        #     leader_id = self.registry.get_leader_id()
+        #     if leader_id and leader_id != self.serverInfo.server_id:
+        #         try:
+        #             await self.send_message_to_server(leader_id, "client_reconnected", {
+        #                 "client_id": client_id,
+        #                 "workflow_id": wf_id,
+        #                 "server_id": self.serverInfo.server_id
+        #             })
+        #             self.log.info(f"[RECOVERY] Notified leader that {client_id} reconnected to this server")
+        #         except Exception as e:
+        #             self.log.warning(f"[RECOVERY] Failed to notify leader: {e}")
 
     async def handle_heartbeat(self, client_id):
         if client_id in self.clients:
@@ -1085,6 +1268,9 @@ class TCPServer:
             #         "status": display_status
             #     }
             # )
+            if len(self.local_events_to_sequence) > 5:
+                self.log.info(f"[STATUS] Buffer has {len(self.local_events_to_sequence)} events, sending to leader for sequencing")
+            
             self.local_events_to_sequence.append(event)
 
 
@@ -1154,6 +1340,26 @@ class TCPServer:
                 }
                 self.local_events_to_sequence.append(event)
 
+                if self.local_events_to_sequence:
+                    # open connection to leader and send events for sequencing
+                    leader_id = self.registry.get_leader_id()
+                    if leader_id == self.serverInfo.server_id:
+                        await self.leader_sequence_status_events({
+                            "workflow_id": workflow_id,
+                            "events": self.local_events_to_sequence
+                        })
+                    else:
+                        try:
+                            await self.send_message_to_server(leader_id, "status_update_report", {
+                                "workflow_id": workflow_id,
+                                "events": self.local_events_to_sequence
+                            })
+                            self.local_events_to_sequence = []
+                            self.log.info(f"[STATUS] Sent {len(self.local_events_to_sequence)} events to leader, buffer cleared")
+                        except Exception as e:
+                            self.log.error(f"Failed to send status update report to leader {leader_id}: {e}")
+
+
         # Only allocate hospital bed when ambulance reaches scene
         if status == "arrived_at_scene":
             hosp_id = self.connected_ambulances.get(client_id, {}).get("assigned_hospital")
@@ -1201,21 +1407,6 @@ class TCPServer:
                     self.log.warning(f"No writer found to notify hospital {hospital_id}")
             else:
                 self.log.warning(f"Hospital {hospital_id} not found in connected hospitals")
-        if self.local_events_to_sequence:
-            # open connection to leader and send events for sequencing
-            leader_id = self.registry.get_leader_id()
-            if leader_id == self.serverInfo.server_id:
-                await self.leader_sequence_status_events({
-                    "workflow_id": workflow_id,
-                    "events": self.local_events_to_sequence
-                })
-            else:
-                await self.send_message_to_server(leader_id, "status_update_report", {
-                    "workflow_id": workflow_id,
-                    "events": self.local_events_to_sequence
-                })
-                self.local_events_to_sequence = []
-
         ack = ServerMessage(
             self.serverInfo.server_id,
             f"ack_{status}",

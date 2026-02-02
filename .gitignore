@@ -5,5 +5,3 @@
 *.pyo
 ._*
 /logs
-FAULT_TOLERANCE_CURRENT_STATUS.md
-.gitignore
