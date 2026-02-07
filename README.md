@@ -34,6 +34,22 @@ Notes:
 - `--discover_timeout` can be updated if required, defaults to `15` seconds.
 - `--heartbeat_interval` can be updated if required, defaults to `15` seconds.
 
+### 3) Client actions
+
+#### Hospital
+
+So make the hospital functional (i.e. assign free patient beds) the user has to type the number of free beds into the console of the client.
+
+Without a free bed a patient cannot be transported to the hospital.
+
+#### Car
+
+To let the car crash the user has to press "C" into the console of the client. Through that the system can assign ambulances to the crash.
+
+#### Ambulance
+
+The status of the ambulances can be controlled by "O" - on duty, "A" - Available, "R" - Reached site or "T" for transporting patient.
+
 ## Requirements 
 
 ### Architectural model
