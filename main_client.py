@@ -27,7 +27,7 @@ def parse_args():
 
 async def discover_leader_via_beacon(timeout=CLIENT_SERVER_DISCOVERY_TIMEOUT):
     """Listen to beacons and extract leader info"""
-    registry = ServerRegistry()
+    registry = ServerRegistry( is_client=True)  # Client registry to track servers and leader from beacons
     protocol, transport = await start_beacon_listener(registry)
     
     MAIN_CLIENT_LOGGER.info(f"Listening for server beacons for {timeout}s...")

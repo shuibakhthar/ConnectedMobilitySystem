@@ -8,19 +8,22 @@ from config.settings import (
     BEACON_INTERVAL,
     BEACON_PORT,
     DISCOVERY_LOGGER,
+    LEADER_HEARTBEAT_TIMEOUT,
     REGISTRY_CLEANUP_INTERVAL,
 )
 from components.tcp_server import ServerInfo
 
 
 class ServerRegistry:
-    def __init__(self, ttl_seconds=REGISTRY_CLEANUP_INTERVAL):
+    def __init__(self, ttl_seconds=REGISTRY_CLEANUP_INTERVAL, is_client=False):
         self.servers = {}
         self.history = {}
         self.leader_id = None
         self.leader_info = None
         self.ttl_seconds = ttl_seconds
         self.global_seq_counter = 0
+        self.last_election_time = 0
+        self.is_client = is_client
 
     def register_server(self, beacon_msg, addr):
         server_info = ServerInfo.from_beacon(beacon_msg, last_seen=time.time())
@@ -31,9 +34,19 @@ class ServerRegistry:
         beacon_leader_id = beacon_msg.get("leader_id")
         beacon_leader_info = beacon_msg.get("leader_info")
         if beacon_leader_id:
-            self.leader_id = beacon_leader_id
-            if beacon_leader_info:
-                self.leader_info = ServerInfo.from_dict(beacon_leader_info)
+            time_since_last_election = time.time() - self.last_election_time
+            if not self.leader_id or time_since_last_election > LEADER_HEARTBEAT_TIMEOUT:
+                if self.leader_id != beacon_leader_id:
+                    if not self.is_client:
+                        DISCOVERY_LOGGER.info(f"Updating leader from beacon: {beacon_leader_id} previous leader: {self.leader_id if self.leader_id else 'None'} ")
+                    self.last_election_time = time.time()
+                        
+                self.leader_id = beacon_leader_id
+                if beacon_leader_info:
+                    self.leader_info = ServerInfo.from_dict(beacon_leader_info)
+            else:
+                if not self.is_client:
+                    DISCOVERY_LOGGER.info(f"Received leader {beacon_leader_id} from beacon but ignoring due to recent election ({time_since_last_election:.1f}s ago)")
 
     def get_server(self, server_id):
         return self.servers.get(server_id)
@@ -53,6 +66,8 @@ class ServerRegistry:
     def set_leader(self, server_id, server_info=None):
         self.leader_id = server_id
         self.leader_info = server_info if server_info else self.servers.get(server_id)
+        self.last_election_time = time.time()
+        DISCOVERY_LOGGER.info(f"New leader elected: {self.leader_id}")
         for s in self.servers.values():
             s.leaderId = self.leader_id
             s.leaderInfo = (
