@@ -26,12 +26,20 @@ class BullyElection:
         if not higher_nodes:
             await self.announce_coordinator()
         else:
-            await self.send_election_messages(higher_nodes)
-            try:
-                await asyncio.wait_for(self.ok_received.wait(), timeout=3)
-                self.log.info("OK received, waiting for coordinator announcement.")
-            except asyncio.TimeoutError:
-                await self.announce_coordinator()
+            # Retry election_start up to 3 times, 3s each
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                self.ok_received.clear()
+                await self.send_election_messages(higher_nodes)
+                try:
+                    await asyncio.wait_for(self.ok_received.wait(), timeout=3)
+                    self.log.info("OK received, waiting for coordinator announcement.")
+                    return
+                except asyncio.TimeoutError:
+                    self.log.warning(
+                        "No OK received (attempt %d/%d).", attempt, max_attempts
+                    )
+            await self.announce_coordinator()
 
     async def send_election_messages(self, nodes):
         for node in nodes:
@@ -63,6 +71,11 @@ class BullyElection:
         self.log.info(f"I am the new coordinator: {self.serverInfo.server_id}")
 
     async def handle_coordinator_message(self, from_id):
+
+        if from_id < self.serverInfo.server_id:
+            self.log.warning(f"Received coordinator announcement from lower ID {from_id}. Ignoring and starting new election.")
+            await self.start_election()
+            return
         self.coordinator_id = from_id
         self.election_in_progress = False
         

@@ -7,6 +7,7 @@ from components.server_message import ServerMessage
 from config.settings import (
     LEADER_MONITOR_INTERVAL,
     LEADER_HEARTBEAT_TIMEOUT,
+    BEACON_INTERVAL,
     TCP_SERVER_LOGGER,
     RETRY_BUFFERED_EVENTS_INTERVAL,
 )
@@ -119,6 +120,7 @@ class ServerInfo:
 class TCPServer:
     def __init__(self, host, port, ctrl_port, registry, heartbeat_timeout=30):
         self.registry = registry
+        self.start_time = time.time()
         self.serverInfo = ServerInfo(
             str(uuid.uuid7()), host, port, ctrl_port, last_seen=time.time(), leaderId=None, active_clients=0
         )
@@ -181,6 +183,14 @@ class TCPServer:
         try:
             while True:
                 await asyncio.sleep(LEADER_MONITOR_INTERVAL)
+                self.log.info("My server ID: %s, Current leader ID: %s", self.serverInfo.server_id, self.registry.get_leader_id() if self.registry.get_leader_id() else None)
+                # Startup grace: wait for beacon discovery before electing
+                time_since_start = time.time() - self.start_time
+                if time_since_start < (BEACON_INTERVAL * 2):
+                    known_servers = self.get_local_server_list()
+                    if len(known_servers) <= 1 and not self.registry.get_leader_id():
+                        self.log.info("Discovery warm-up (%0.1fs). Skipping election.", time_since_start)
+                        continue
                 if self.is_leader_missing_or_dead():
                     self.log.warning("Leader missing or dead, starting election")
                     await self.election.start_election()
