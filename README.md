@@ -14,7 +14,7 @@ Each server starts a TCP server plus a control channel and broadcasts beacons. E
 - `python main_server.py --tcp_port=8890`
 
 Notes:
-- `--host` defaults to `127.0.0.1`.
+- `--host` Auto-detect local network IP address ,if it failes,it defaults to `127.0.0.1`.
 - `--beacon_port` defaults to `9999` (see `BEACON_PORT` in settings).
 - The control channel is `tcp_port + 1` and is used for election messages.
 
