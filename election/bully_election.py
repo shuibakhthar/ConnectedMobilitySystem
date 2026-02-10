@@ -1,6 +1,7 @@
 import asyncio
+import time
 from components.server_message import ServerMessage
-from config.settings import BULLY_ELECTION_LOGGER
+from config.settings import BULLY_ELECTION_LOGGER, SERVER_STALE_TIME
 
 
 class BullyElection:
@@ -15,13 +16,26 @@ class BullyElection:
     async def _get_servers(self):
         """Get fresh server list from registry"""
         return [s.to_dict() for s in self.registry.get_all_servers()]
+    
+    def _filter_live_servers(self, servers):
+        """Filter servers that have been seen recently (within 15s)"""
+        now = time.time()
+        live = []
+        for s in servers:
+            time_since_seen = now - s.get('last_seen', 0)
+            if time_since_seen <= SERVER_STALE_TIME:
+                live.append(s)
+            else:
+                self.log.debug(f"Filtering out stale server {s['server_id'][:8]} (last seen {time_since_seen:.1f}s ago)")
+        return live
 
     async def start_election(self):
         self.election_in_progress = True
         self.ok_received.clear()
         servers = await self._get_servers()
+        live_servers = self._filter_live_servers(servers)
         
-        higher_nodes = [s for s in servers if s['server_id'] > self.serverInfo.server_id]
+        higher_nodes = [s for s in live_servers if s['server_id'] > self.serverInfo.server_id] 
         
         if not higher_nodes:
             await self.announce_coordinator()
@@ -42,7 +56,8 @@ class BullyElection:
             await self.announce_coordinator()
 
     async def send_election_messages(self, nodes):
-        for node in nodes:
+        live_nodes = self._filter_live_servers(nodes)
+        for node in live_nodes:
             await self.send_message(node, "election_start", {"from": self.serverInfo.server_id})
 
     async def handle_election_message(self, from_id):
@@ -62,7 +77,8 @@ class BullyElection:
         self.registry.set_leader(self.serverInfo.server_id, self.serverInfo)
         
         servers = await self._get_servers()
-        for node in servers:
+        live_servers = self._filter_live_servers(servers)
+        for node in live_servers:
             if node['server_id'] != self.serverInfo.server_id:
                 await self.send_message(node, "election_coordinator", {"from": self.serverInfo.server_id})
         

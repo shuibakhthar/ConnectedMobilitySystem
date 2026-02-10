@@ -121,7 +121,7 @@ LEADER_HEARTBEAT_TIMEOUT = 15  # seconds to wait for leader heartbeat before tri
 LEADER_MONITOR_INTERVAL = 3  # seconds between leader health checks
 
 REGISTRY_CLEANUP_INTERVAL = 7  # seconds between registry cleanup checks
-SERVER_STALE_TIME = 20  # seconds before a server is considered stale
+SERVER_STALE_TIME = 15  # seconds before a server is considered stale
 
 RETRY_BUFFERED_EVENTS_INTERVAL = 10  # seconds between retries to send buffered events to leader
 CLIENT_SERVER_DISCOVERY_TIMEOUT = 5  # seconds to listen for beacons

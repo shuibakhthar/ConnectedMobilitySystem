@@ -10,12 +10,13 @@ from config.settings import (
     DISCOVERY_LOGGER,
     LEADER_HEARTBEAT_TIMEOUT,
     REGISTRY_CLEANUP_INTERVAL,
+    SERVER_STALE_TIME,
 )
 from components.tcp_server import ServerInfo
 
 
 class ServerRegistry:
-    def __init__(self, ttl_seconds=REGISTRY_CLEANUP_INTERVAL, is_client=False):
+    def __init__(self, ttl_seconds=SERVER_STALE_TIME, is_client=False):
         self.servers = {}
         self.history = {}
         self.leader_id = None
@@ -46,7 +47,7 @@ class ServerRegistry:
                     self.leader_info = ServerInfo.from_dict(beacon_leader_info)
             else:
                 if not self.is_client:
-                    DISCOVERY_LOGGER.info(f"Received leader {beacon_leader_id} from beacon but ignoring due to recent election ({time_since_last_election:.1f}s ago)")
+                    DISCOVERY_LOGGER.debug(f"Received leader {beacon_leader_id} from beacon but ignoring due to recent election ({time_since_last_election:.1f}s ago)")
 
     def get_server(self, server_id):
         return self.servers.get(server_id)
