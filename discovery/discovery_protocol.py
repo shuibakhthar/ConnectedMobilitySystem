@@ -36,10 +36,7 @@ class ServerRegistry:
         # Update leader from beacon
         beacon_leader_id = beacon_msg.get("leader_id")
         beacon_leader_info = beacon_msg.get("leader_info")
-        if not self.is_client and beacon_leader_id and beacon_leader_id != self.leader_id:
-            DISCOVERY_LOGGER.warning(f"Split brain detected: beacon leader {beacon_leader_id} differs from current leader {self.leader_id if self.leader_id else 'None'}")  
-            self.split_brain_detected = True
-            return
+        
         if beacon_leader_id:
             if self.leader_id == beacon_leader_id and beacon_leader_info:
                 # Update leader info if we already know the leader but got more recent info from beacon
@@ -58,7 +55,11 @@ class ServerRegistry:
             else:
                 if not self.is_client:
                     DISCOVERY_LOGGER.debug(f"Received leader {beacon_leader_id} from beacon but ignoring due to recent election ({time_since_last_election:.1f}s ago)")
-
+                if not self.is_client and beacon_leader_id and beacon_leader_id != self.leader_id:
+                    DISCOVERY_LOGGER.warning(f"Split brain detected: beacon leader {beacon_leader_id} differs from current leader {self.leader_id if self.leader_id else 'None'}")  
+                    self.split_brain_detected = True
+                
+                
     def get_server(self, server_id):
         return self.servers.get(server_id)
 
