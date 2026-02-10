@@ -11,6 +11,7 @@ from config.settings import (
     LEADER_HEARTBEAT_TIMEOUT,
     REGISTRY_CLEANUP_INTERVAL,
     SERVER_STALE_TIME,
+    get_local_ip,
 )
 from components.tcp_server import ServerInfo
 
@@ -25,6 +26,7 @@ class ServerRegistry:
         self.global_seq_counter = 0
         self.last_election_time = 0
         self.is_client = is_client
+        self.split_brain_detected = False
 
     def register_server(self, beacon_msg, addr):
         server_info = ServerInfo.from_beacon(beacon_msg, last_seen=time.time())
@@ -34,7 +36,15 @@ class ServerRegistry:
         # Update leader from beacon
         beacon_leader_id = beacon_msg.get("leader_id")
         beacon_leader_info = beacon_msg.get("leader_info")
+        if not self.is_client and beacon_leader_id and beacon_leader_id != self.leader_id:
+            DISCOVERY_LOGGER.warning(f"Split brain detected: beacon leader {beacon_leader_id} differs from current leader {self.leader_id if self.leader_id else 'None'}")  
+            self.split_brain_detected = True
+            return
         if beacon_leader_id:
+            if self.leader_id == beacon_leader_id and beacon_leader_info:
+                # Update leader info if we already know the leader but got more recent info from beacon
+                self.leader_info = ServerInfo.from_dict(beacon_leader_info)
+
             time_since_last_election = time.time() - self.last_election_time
             if not self.leader_id or time_since_last_election > LEADER_HEARTBEAT_TIMEOUT:
                 if self.leader_id != beacon_leader_id:
@@ -93,7 +103,7 @@ class ServerRegistry:
         ]
         for sid in stale_ids:
             del self.servers[sid]
-            DISCOVERY_LOGGER.debug(f"Pruned stale server {sid}")
+            DISCOVERY_LOGGER.info(f"Pruned stale server {sid}")
 
         # Clear stale leader
         if self.leader_id and self.leader_id not in self.servers:
@@ -119,6 +129,10 @@ class BeaconServer:
 
         while True:
             try:
+                current_ip = get_local_ip()
+                if self.server_info.host != current_ip:
+                    DISCOVERY_LOGGER.warning(f"Local IP changed from {self.server_info.host} to {current_ip}. Updating server info.")
+                    self.server_info.host = current_ip
                 # Build message with current leader info
                 msg = {
                     "type": "server_beacon",
@@ -127,7 +141,12 @@ class BeaconServer:
                     "tcp_port": self.server_info.port,
                     "ctrl_port": self.server_info.ctrl_port,
                     "leader_id": self.registry.get_leader_id(),
-                    "leader_info": self.registry.get_leader_info().to_dict(shallow_leader=True) if self.registry.get_leader_info() else None,
+                    "leader_info":  (
+                        self.server_info.to_dict(shallow_leader=True) 
+                        if self.registry.get_leader_id() == self.server_info.server_id 
+                        else (self.registry.get_leader_info().to_dict(shallow_leader=True) 
+                            if self.registry.get_leader_info() else None)
+                    ),
                     "active_clients": self.server_info.active_clients,
                     "resources": self.server_info.get_resources(),
                 }

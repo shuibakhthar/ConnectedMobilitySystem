@@ -183,7 +183,7 @@ class TCPServer:
         try:
             while True:
                 await asyncio.sleep(LEADER_MONITOR_INTERVAL)
-                self.log.info("My server ID: %s, Current leader ID: %s", self.serverInfo.server_id, self.registry.get_leader_id() if self.registry.get_leader_id() else None)
+                self.log.info("My server ID: %s, Current leader ID: %s, HOST: %s, PORT: %s", self.serverInfo.server_id, self.registry.get_leader_id() if self.registry.get_leader_id() else None, self.serverInfo.host, self.serverInfo.port)
                 # Startup grace: wait for beacon discovery before electing
                 time_since_start = time.time() - self.start_time
                 if time_since_start < (BEACON_INTERVAL * 2):
@@ -191,6 +191,11 @@ class TCPServer:
                     if len(known_servers) <= 1 and not self.registry.get_leader_id():
                         self.log.info("Discovery warm-up (%0.1fs). Skipping election.", time_since_start)
                         continue
+                if self.registry.split_brain_detected:
+                    self.log.warning("Split brain detected, skipping leader monitoring to avoid conflicts and starting new elections")
+                    self.registry.split_brain_detected = False  # Reset flag after detection
+                    await self.election.start_election()
+                    continue
                 if self.is_leader_missing_or_dead():
                     self.log.warning("Leader missing or dead, starting election")
                     await self.election.start_election()
@@ -752,19 +757,26 @@ class TCPServer:
     
     async def leader_sequence_status_events(self, payload):
         """LEADER ONLY: Sequence status changes reported from servers"""
-        workflow_id = payload.get('workflow_id')
+        # workflow_id = payload.get('workflow_id')
         status_events_data = payload.get('events', [])  # List of {client_id, status, description}
         
-        self.log.info(f"[LEADER] Sequencing {len(status_events_data)} status updates for workflow {workflow_id}")
         
         events_to_broadcast = []
+        workflow_last_seq={}
         
         for i, status_data in enumerate(status_events_data):
             next_seq = self.get_next_global_seq_counter()
             
+            event_workflow_id = status_data.get('workflow_id')
+            self.log.info(f"[LEADER] Sequencing {len(status_events_data)} status updates for workflow {event_workflow_id}")
+
+            depends_on = []
+            if event_workflow_id in workflow_last_seq:
+                depends_on = [workflow_last_seq[event_workflow_id]]
+
             status_event = self.event_ordering_logger.log_event(
                 sequence_counter=next_seq,
-                workflow_id=workflow_id,
+                workflow_id=event_workflow_id,
                 event_type= status_data.get("event_type", "workflow_event"),
                 event_sub_type=status_data.get("event_sub_type", "sequence_update"),
                 description=status_data.get('description', ''),
@@ -772,6 +784,7 @@ class TCPServer:
                 data= status_data.get('data', {})
             )
             events_to_broadcast.append(status_event)
+            workflow_last_seq[event_workflow_id] = next_seq
             # self.registry.global_seq = next_seq
         
         # Broadcast all status changes together
@@ -1457,21 +1470,64 @@ class TCPServer:
             self.log.warning(f"Car {car_id} not found in clients to notify about help")
 
     def print_all_clients(self):
-        """Print all connected clients and their statuses in a neat formatted table."""
-        print("\n" + "="*100)
-        print(f"{'CLIENT STATUS REPORT':^100}")
-        print("="*100)
+        """Print entire server status including clients, workflows, events, and resources."""
+        print("\n" + "="*120)
+        print(f"{'ENTIRE SERVER STATUS REPORT':^120}")
+        print("="*120)
         
         total_clients = len(self.clients)
-        print(f"\nTotal Connected Clients: {total_clients}\n")
+        print(f"\nTotal Connected Clients: {total_clients}")
+        print(f"Total Active Workflows: {len(self.active_workflows)}")
+        print(f"Total Events Logged: {len(self.event_log)}")
+        print(f"Global Sequence Counter: {self.registry.global_seq_counter}\n")
         
+        # Print All Known Servers in Cluster
+        print("-" * 120)
+        print(f"{'ALL KNOWN SERVERS IN CLUSTER':^120}")
+        print("-" * 120)
+        servers = self.get_local_server_list()
+        if servers:
+            print(f"{'Server ID':<30} {'Role':<12} {'Host':<20} {'Port':<8} {'Ctrl Port':<10} {'Active Clients':<15}")
+            print("-" * 120)
+            for server in servers:
+                server_id = server['server_id']
+                display_server_id = server_id[-8:] if server_id else "N/A"
+                leader_id = self.registry.get_leader_id()
+                is_leader = leader_id == server_id
+                leader_status = "LEADER" if is_leader else "FOLLOWER"
+                host = server.get('host', 'N/A')
+                port = server.get('port', 'N/A')
+                ctrl_port = server.get('ctrl_port', 'N/A')
+                active_clients = server.get('active_clients', 0)
+                print(f"{display_server_id:<30} {leader_status:<12} {str(host):<20} {str(port):<8} {str(ctrl_port):<10} {str(active_clients):<15}")
+        else:
+            print("No servers found in registry")
+        
+        # Print Current Server Status
+        print("\n" + "-" * 120)
+        print(f"{'CURRENT SERVER DETAILS':^120}")
+        print("-" * 120)
+        if self.serverInfo:
+            server_id = self.serverInfo.server_id
+            display_server_id = server_id[-8:] if server_id else "N/A"
+            is_leader = self.registry.get_leader_id() == self.serverInfo.server_id
+            leader_status = "LEADER" if is_leader else "FOLLOWER"
+            print(f"{'Server ID':<30} {'Role':<12} {'Host':<20} {'Port':<8} {'Ctrl Port':<10} {'Last Crash':<5}")
+            print("-" * 120)
+            print(
+                f"{display_server_id:<30} {leader_status:<12} {self.serverInfo.host:<20} "
+                f"{str(self.serverInfo.port):<8} {str(self.serverInfo.ctrl_port):<10} {str(self.local_server_crash_count):<5}"
+            )
+        else:
+            print("Server information not available")
+
         # Print Cars
-        print("-" * 100)
-        print(f"{'CARS':^100}")
-        print("-" * 100)
+        print("\n" + "-" * 120)
+        print(f"{'CARS':^120}")
+        print("-" * 120)
         if self.connected_cars:
-            print(f"{'Client ID':<30} {'Status':<20} {'Latitude':<15} {'Longitude':<15} {'Registered':<20}")
-            print("-" * 100)
+            print(f"{'Car ID':<30} {'Status':<20} {'Latitude':<15} {'Longitude':<15} {'Registered':<20}")
+            print("-" * 120)
             for car_id, car_info in self.connected_cars.items():
                 status = car_info.get("status", "N/A")
                 latitude = car_info.get("latitude", "N/A")
@@ -1486,30 +1542,31 @@ class TCPServer:
             print("No cars connected")
         
         # Print Ambulances
-        print("\n" + "-" * 100)
-        print(f"{'AMBULANCES':^100}")
-        print("-" * 100)
+        print("\n" + "-" * 120)
+        print(f"{'AMBULANCES':^120}")
+        print("-" * 120)
         if self.connected_ambulances:
-            print(f"{'Ambulance ID':<30} {'Status':<20} {'Registered':<20}")
-            print("-" * 100)
+            print(f"{'Ambulance ID':<30} {'Status':<20} {'Workflow':<30} {'Hospital':<20}")
+            print("-" * 120)
             for amb_id, amb_info in self.connected_ambulances.items():
                 status = amb_info.get("status", "N/A")
-                if amb_id in self.clients:
-                    _, _, _, _, registered_time = self.clients[amb_id]
-                    registered_str = registered_time.strftime("%Y-%m-%d %H:%M:%S") if registered_time else "N/A"
-                else:
-                    registered_str = "N/A"
-                print(f"{amb_id:<30} {status:<20} {registered_str:<20}")
+                workflow_id = amb_info.get("workflow_id", "N/A")
+                hospital_id = amb_info.get("assigned_hospital", "N/A")
+                if workflow_id:
+                    workflow_id = workflow_id[-15:] if len(str(workflow_id)) > 15 else workflow_id
+                if hospital_id:
+                    hospital_id = hospital_id[-15:] if len(str(hospital_id)) > 15 else hospital_id
+                print(f"{amb_id:<30} {status:<20} {str(workflow_id):<30} {str(hospital_id):<20}")
         else:
             print("No ambulances connected")
         
         # Print Hospitals
-        print("\n" + "-" * 100)
-        print(f"{'HOSPITALS':^100}")
-        print("-" * 100)
+        print("\n" + "-" * 120)
+        print(f"{'HOSPITALS':^120}")
+        print("-" * 120)
         if self.connected_hospitals:
             print(f"{'Hospital ID':<30} {'Status':<20} {'Beds Available':<15} {'Registered':<20}")
-            print("-" * 100)
+            print("-" * 120)
             for hosp_id, hosp_info in self.connected_hospitals.items():
                 status = hosp_info.get("status", "N/A")
                 occupancy = hosp_info.get("current_occupancy", "N/A")
@@ -1522,7 +1579,58 @@ class TCPServer:
         else:
             print("No hospitals connected")
         
-        print("\n" + "="*100 + "\n")
+        # Print Active Workflows
+        print("\n" + "-" * 120)
+        print(f"{'ACTIVE WORKFLOWS':^120}")
+        print("-" * 120)
+        if self.active_workflows:
+            print(f"{'Workflow ID':<35} {'Car ID':<25} {'Ambulance':<25} {'Hospital':<25}")
+            print("-" * 120)
+            for wf_id, workflow in self.active_workflows.items():
+                wf_id_short = wf_id[-30:] if len(wf_id) > 30 else wf_id
+                car_id = workflow.get('data', {}).get('car_id', 'N/A')[-20:]
+                amb_id = workflow.get('data', {}).get('ambulance_id', 'N/A')[-20:]
+                hosp_id = workflow.get('data', {}).get('hospital_id', 'N/A')[-20:]
+                print(f"{wf_id_short:<35} {str(car_id):<25} {str(amb_id):<25} {str(hosp_id):<25}")
+        else:
+            print("No active workflows")
+        
+        # Print Recent Events
+        print("\n" + "-" * 120)
+        print(f"{'RECENT EVENTS (Last 5)':^120}")
+        print("-" * 120)
+        if self.event_log:
+            print(f"{'Seq':<8} {'Event Type':<20} {'Workflow':<30} {'Description':<60}")
+            print("-" * 120)
+            for event in self.event_log[-5:]:
+                seq = event.get('seq', 'N/A')
+                evt_type = event.get('event_type', 'N/A')
+                wf_id = event.get('workflow_id', 'N/A')
+                if wf_id and wf_id != 'N/A':
+                    wf_id = wf_id[-25:]
+                description = event.get('description', '')[:55]
+                print(f"{str(seq):<8} {str(evt_type):<20} {str(wf_id):<30} {description:<60}")
+        else:
+            print("No events logged")
+        
+        # Print Global Resources (Leader only)
+        if self.registry.get_leader_id() == self.serverInfo.server_id and self.global_resources:
+            print("\n" + "-" * 120)
+            print(f"{'GLOBAL RESOURCES (LEADER VIEW)':^120}")
+            print("-" * 120)
+            for server_id, resources in self.global_resources.items():
+                server_short = server_id[-8:]
+                amb_count = len(resources.get("ambulances", {}))
+                hosp_count = len(resources.get("hospitals", {}))
+                print(f"Server {server_short}: {amb_count} ambulances, {hosp_count} hospitals")
+        
+        # Print Buffered Events
+        print("\n" + "-" * 120)
+        print(f"{'LOCAL BUFFERED EVENTS':^120}")
+        print("-" * 120)
+        print(f"Events waiting to be sequenced: {len(self.local_events_to_sequence)}")
+        
+        print("\n" + "="*120 + "\n")
 
     async def periodic_status_print(self):
         """Periodically print the status of all connected clients."""
@@ -1543,10 +1651,10 @@ class TCPServer:
         resource_task = asyncio.create_task(self.update_global_resources_from_beacons())
 
         server = await asyncio.start_server(
-            self.handle_client, self.serverInfo.host, self.serverInfo.port
+            self.handle_client, "0.0.0.0", self.serverInfo.port
         )
         ctrl_server = await asyncio.start_server(
-            self.handle_ctrl_message, self.serverInfo.host, self.serverInfo.ctrl_port
+            self.handle_ctrl_message, "0.0.0.0", self.serverInfo.ctrl_port
         )
 
         self.log.info(
