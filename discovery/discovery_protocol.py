@@ -26,7 +26,6 @@ class ServerRegistry:
         self.global_seq_counter = 0
         self.last_election_time = 0
         self.is_client = is_client
-        self.split_brain_detected = False
 
     def register_server(self, beacon_msg, addr):
         server_info = ServerInfo.from_beacon(beacon_msg, last_seen=time.time())
@@ -37,11 +36,43 @@ class ServerRegistry:
         beacon_leader_id = beacon_msg.get("leader_id")
         beacon_leader_info = beacon_msg.get("leader_info")
         time_since_last_election = time.time() - self.last_election_time
+        now = time.time()
 
-        if not self.is_client and self.leader_id and beacon_leader_id and beacon_leader_id != self.leader_id and time_since_last_election > LEADER_HEARTBEAT_TIMEOUT:
-            DISCOVERY_LOGGER.warning(f"Split brain detected: beacon leader {beacon_leader_id} differs from current leader {self.leader_id if self.leader_id else 'None'}")  
-            self.split_brain_detected = True
-            return
+        # Split brain resolution using UUID comparison:
+        # After grace period, if we see conflicting leaders (both active), accept the higher UUID
+        if (not self.is_client and 
+            self.leader_id and 
+            beacon_leader_id and 
+            beacon_leader_id != self.leader_id and 
+            time_since_last_election > LEADER_HEARTBEAT_TIMEOUT * 0.6):  # Grace period: 60% of timeout
+            
+            # Verify both leaders are active (have recent beacon activity)
+            beacon_leader_server = self.servers.get(beacon_leader_id)
+            current_leader_server = self.servers.get(self.leader_id)
+            
+            beacon_leader_active = beacon_leader_server and (now - beacon_leader_server.last_seen) < self.ttl_seconds
+            current_leader_active = current_leader_server and (now - current_leader_server.last_seen) < self.ttl_seconds
+            
+            if beacon_leader_active and current_leader_active:
+                # Split brain detected - resolve by accepting higher UUID
+                if beacon_leader_id > self.leader_id:
+                    DISCOVERY_LOGGER.warning(
+                        f"Split brain resolved: accepting higher UUID leader {beacon_leader_id} "
+                        f"over current leader {self.leader_id}"
+                    )
+                    self.leader_id = beacon_leader_id
+                    if beacon_leader_info:
+                        self.leader_info = ServerInfo.from_dict(beacon_leader_info)
+                    self.last_election_time = now
+                    return
+                else:
+                    # Keep current leader (higher or equal UUID)
+                    DISCOVERY_LOGGER.debug(
+                        f"Split brain detected: keeping current leader {self.leader_id} "
+                        f"(higher than beacon leader {beacon_leader_id})"
+                    )
+                    return
+        
         if beacon_leader_id:
             if self.leader_id == beacon_leader_id and beacon_leader_info:
                 # Update leader info if we already know the leader but got more recent info from beacon

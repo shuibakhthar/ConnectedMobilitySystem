@@ -191,11 +191,7 @@ class TCPServer:
                     if len(known_servers) <= 1 and not self.registry.get_leader_id():
                         self.log.info("Discovery warm-up (%0.1fs). Skipping election.", time_since_start)
                         continue
-                if self.registry.split_brain_detected:
-                    self.log.warning("Split brain detected, skipping leader monitoring to avoid conflicts and starting new elections")
-                    self.registry.split_brain_detected = False  # Reset flag after detection
-                    await self.election.start_election()
-                    continue
+                
                 if self.is_leader_missing_or_dead():
                     self.log.warning("Leader missing or dead, starting election")
                     await self.election.start_election()
