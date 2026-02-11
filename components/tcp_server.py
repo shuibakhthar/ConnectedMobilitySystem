@@ -4,6 +4,8 @@ import uuid
 import time
 from components.client_message import deserialize_client_message
 from components.server_message import ServerMessage
+from components.multicast_server import MulticastServer
+
 from config.settings import (
     LEADER_MONITOR_INTERVAL,
     LEADER_HEARTBEAT_TIMEOUT,
@@ -13,7 +15,6 @@ from config.settings import (
 )
 from config.events_logging import EventOrderingLogger
 from election.bully_election import BullyElection
-
 
 class ServerInfo:
     def __init__(self, server_id, host, port, ctrl_port, zone=None, last_seen=None, leaderId=None, leaderInfo=None, active_clients=0, cached_resources={}):
@@ -150,6 +151,41 @@ class TCPServer:
         )
 
         self.local_events_to_sequence = []
+
+        self.multicast = MulticastServer(
+            server_id=self.serverInfo.server_id,
+            host=self.serverInfo.host,
+            logger=self.log
+        )
+        self.multicast.initialize_receiver()
+
+    async def listen_multicast(self):
+        """
+        Background task: Listen for multicast events on all followers + leader.
+        This runs continuously and processes incoming multicast batches.
+        """
+        while True:
+            try:
+                await asyncio.sleep(0.01)  # Yield to event loop
+                
+                batch = self.multicast.receive_batch()
+                if batch:
+                    self.log.info(
+                        f"[MULTICAST-RX] Received batch: seq {batch['seq_range']} "
+                        f"({batch['event_count']} events)"
+                    )
+                    
+                    # Process the batch
+                    await self.handle_global_event({
+                        "events": batch['events']
+                    })
+                    
+            except asyncio.CancelledError:
+                self.log.info("[MULTICAST] Listener task cancelled")
+                break
+            except Exception as e:
+                self.log.error(f"[MULTICAST] Listener error: {e}")
+                await asyncio.sleep(1)
 
     def get_next_global_seq_counter(self):
         """Get max sequence number from local event log"""
@@ -397,7 +433,34 @@ class TCPServer:
                 self.log.error(f"[BUFFER RECOVERY] Failed to send buffered events for workflow {wf_id} to leader {leader_id[:8]}: {e}")
             self.local_events_to_sequence =[]  # Clear after sending
             self.log.info(f"[BUFFER RECOVERY] Cleared local buffered events after sending to leader {leader_id[:8]}")
-
+    
+    async def handle_recovery_request(self, requesting_server_id):
+        self.log.info(f"[RECOVERY] {requesting_server_id} requesting event log recovery")
+                
+        # Send full event log + metadata
+        recovery_payload = {
+            "last_seq": self.registry.global_seq_counter,
+            "event_log": self.event_log,
+            "active_workflows": self.active_workflows
+        }
+        
+        response = ServerMessage(
+            server_id = self.serverInfo.server_id,
+            status = "event_log_recovery_response",
+            payload = recovery_payload
+        )
+        
+        # Extract requester address from active connections and send back
+        # (Alternative: look up in registry and connect back)
+        try:
+            for client_conn in self.connected_servers.values():
+                if client_conn.get('server_id') == requesting_server_id:
+                    # Send via existing connection
+                    client_conn['writer'].write(response.serialize())
+                    await client_conn['writer'].drain()
+                    break
+        except Exception as e:
+            self.log.error(f"[RECOVERY] Failed to send recovery response: {e}")
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info("peername")
         self.log.info(f"Connection from {addr}")
@@ -492,6 +555,15 @@ class TCPServer:
                     await self.leader_sequence_status_events(msg.payload)
             elif msg.status == "request_buffered_events":
                 await self.send_buffered_events_to_leader(msg.server_id)
+            elif msg.status == "request_event_log_recovery":
+                await self.handle_recovery_request(msg.server_id)
+            elif msg.status == "event_log_recovery_response":
+                payload = msg.payload
+                self.log.info(f"Received event log recovery response with {len(payload.get('events', []))} events")
+                self.event_log = payload.get("events", [])
+                self.active_workflows = payload.get("active_workflows", {})
+                self.registry.global_seq_counter = payload.get("global_seq_counter", self.registry.global_seq_counter)
+                self.log.info(f"Updated local event log and active workflows from recovery response")
             elif msg.status == "client_reconnected":
                 # Leader: client reconnected to different server
                 if self.registry.get_leader_id() == self.serverInfo.server_id:
@@ -797,24 +869,31 @@ class TCPServer:
                 self.registry.global_seq_counter = event['seq']
 
             self.log.info(f"[BROADCAST] Event #{event['seq']}: {event['event_type']} : {event.get('event_sub_type','')} for workflow {event['workflow_id']}")
+
+        multicast_success =  self.multicast.send_batch(events_list)
+        if multicast_success:
+            self.log.debug(f"[MULTICAST] Successfully sent event batch via multicast")
+            return
+        else:            
+            self.log.warning(f"[MULTICAST] Multicast failed, falling back to unicast for event batch")
+
+            servers = [s.to_dict() for s in self.registry.get_all_servers()]
             
-        servers = [s.to_dict() for s in self.registry.get_all_servers()]
-        
-        for server in servers:
-            if server['server_id'] == self.serverInfo.server_id:
-                # Apply locally
-                await self.handle_global_event({"events": events_list})
-            else:
-                # Send to remote server
-                try:
-                    msg = ServerMessage(self.serverInfo.server_id, "workflow_event_batch", {"events":events_list})
-                    _, w = await asyncio.open_connection(server['host'], server['ctrl_port'])
-                    w.write(msg.serialize())
-                    await w.drain()
-                    w.close()
-                    await w.wait_closed()
-                except Exception as e:
-                    self.log.error(f"Failed to broadcast to {server['server_id'][:8]}: {e}")
+            for server in servers:
+                if server['server_id'] == self.serverInfo.server_id:
+                    # Apply locally
+                    await self.handle_global_event({"events": events_list})
+                else:
+                    # Send to remote server
+                    try:
+                        msg = ServerMessage(self.serverInfo.server_id, "workflow_event_batch", {"events":events_list})
+                        _, w = await asyncio.open_connection(server['host'], server['ctrl_port'])
+                        w.write(msg.serialize())
+                        await w.drain()
+                        w.close()
+                        await w.wait_closed()
+                    except Exception as e:
+                        self.log.error(f"Failed to broadcast to {server['server_id'][:8]}: {e}")
 
 
     async def handle_global_event(self, payload):
@@ -822,6 +901,20 @@ class TCPServer:
             events_list = payload.get('events', [])
         else:
             events_list = [payload]
+
+        # Missing dependency check
+
+        missing_seqs = set()
+        for event in events_list:
+            depends_on = event.get('depends_on', [])
+            for dep_seq in depends_on:
+                # check both local event log and incoming batch for dependency
+                if not any(e['seq'] == dep_seq for e in self.event_log) and not any(e['seq'] == dep_seq for e in events_list): 
+                    missing_seqs.add(dep_seq)
+        if missing_seqs:
+            self.log.warning(f"[GLOBAL EVENT] Missing dependencies for event batch: {missing_seqs}. Requesting snapshot from leader.")
+            await self.request_recovery_from_leader()
+            return
 
         for event in events_list:
             """ALL SERVERS: Apply event to local state (no execution, just replication)"""
@@ -879,6 +972,56 @@ class TCPServer:
                     self.log.warning(f"[DEBUG] Workflow {workflow_id} NOT found in active_workflows")
                     self.log.warning(f"[DEBUG] Available workflows: {list(self.active_workflows.keys())}")
     
+    async def request_recovery_from_leader(self):
+        """
+        Follower detects missing dependencies → request full event log from leader.
+        This is the TCP recovery fallback when multicast packets are lost.
+        """
+        leader_id = self.registry.get_leader_id()
+        if leader_id == self.serverInfo.server_id:
+            self.log.debug("[RECOVERY] I am the leader, no need to request.")
+            return
+        
+        # Find leader's address
+        leader_info = None
+        for server in self.registry.get_all_servers():
+            if server.server_id == leader_id:
+                leader_info = server
+                break
+        
+        if not leader_info:
+            self.log.error("[RECOVERY] Leader not found in server registry")
+            return
+        
+        try:
+            self.log.info(
+                f"[RECOVERY] Requesting event log from leader "
+                f"{leader_info.server_id[:8]} at {leader_info.host}:{leader_info.ctrl_port}"
+            )
+            
+            # Request recovery
+            msg = ServerMessage(
+                server_id =self.serverInfo.server_id,
+                status = "request_event_log_recovery",
+                payload = {
+                    "current_last_seq": self.registry.global_seq_counter,
+                    "event_log_size": len(self.event_log)
+                }
+            )
+            
+            _, w = await asyncio.open_connection(
+                leader_info.host,
+                leader_info.ctrl_port
+            )
+            w.write(msg.serialize())
+            await w.drain()
+            w.close()
+            await w.wait_closed()
+            
+            self.log.info("[RECOVERY] Event log recovery request sent to leader")
+        except Exception as e:
+            self.log.error(f"[RECOVERY] Failed to request leader: {e}")
+
     def rebuild_resource_state_from_event(self, event):
         """Leader failover: Reconstruct allocated resources from event log"""
         event_data = event.get('data', {})
@@ -1367,6 +1510,7 @@ class TCPServer:
                             "workflow_id": workflow_id,
                             "events": self.local_events_to_sequence
                         })
+                        self.local_events_to_sequence = []
                     else:
                         try:
                             await self.send_message_to_server(leader_id, "status_update_report", {
@@ -1645,7 +1789,7 @@ class TCPServer:
         cleanup_task = asyncio.create_task(self.cleanup_task())
         status_task = asyncio.create_task(self.periodic_status_print())
         resource_task = asyncio.create_task(self.update_global_resources_from_beacons())
-
+        multicast = asyncio.create_task(self.listen_multicast())
         server = await asyncio.start_server(
             self.handle_client, "0.0.0.0", self.serverInfo.port
         )
@@ -1666,4 +1810,5 @@ class TCPServer:
                 cleanup_task.cancel()
                 status_task.cancel()
                 resource_task.cancel()
-                await asyncio.gather(monitor_task, cleanup_task, status_task, resource_task, return_exceptions=True)
+                multicast.cancel()
+                await asyncio.gather(monitor_task, cleanup_task, status_task, resource_task, multicast, return_exceptions=True)
