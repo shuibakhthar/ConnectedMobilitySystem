@@ -157,6 +157,16 @@ class BeaconServer:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.setblocking(False)
 
+        # Bind the socket to the server's chosen host IP so the OS uses
+        # that address as the source for outgoing broadcast packets.
+        # This avoids the kernel choosing a different interface IP.
+        try:
+            # bind to ephemeral port on the desired interface/address
+            sock.bind((self.server_info.host, 0))
+        except Exception as e:
+            # If bind fails (e.g., invalid host), log and continue — OS will choose source IP
+            DISCOVERY_LOGGER.debug(f"Beacon socket bind to {self.server_info.host} failed: {e}")
+
         broadcast_addr = ("255.255.255.255", BEACON_PORT)
 
         while True:
