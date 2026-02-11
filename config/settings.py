@@ -6,13 +6,35 @@ import socket
 def get_local_ip():
     """Auto-detect local network IP, filtering out virtual adapters"""
     try:
-        # Connect to Google DNS (doesn't actually send data)
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
+        # Prefer UDP method (returns the IP used for outbound traffic / default route)
+        virtual_prefixes = ('127.', '172.17.', '192.168.56.', '192.168.99.', '10.0.2.')
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # connect to a public IP (no packets actually sent) to determine outbound interface
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if not any(ip.startswith(prefix) for prefix in virtual_prefixes):
+                return ip
+        except Exception:
+            # If UDP method fails, fall back to hostname resolution below
+            pass
+
+        # Fallback: get all network interfaces via hostname resolution
+        hostname = socket.gethostname()
+        all_ips = socket.gethostbyname_ex(hostname)[2]
+
+        # Return first non-virtual IP from hostname list
+        for ip in all_ips:
+            if not any(ip.startswith(prefix) for prefix in virtual_prefixes):
+                return ip
+
+        # If still not found, return the UDP-derived ip if we have it, else localhost
+        try:
+            return ip  # from UDP method if present
+        except Exception:
+            return "127.0.0.1"
+    except Exception as e:
         # Fallback to localhost
         return "127.0.0.1"
 
