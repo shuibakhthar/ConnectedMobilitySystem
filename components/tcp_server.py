@@ -1728,9 +1728,9 @@ class TCPServer:
             print("-" * 120)
             for wf_id, workflow in self.active_workflows.items():
                 wf_id_short = wf_id[-30:] if len(wf_id) > 30 else wf_id
-                car_id = workflow.get('data', {}).get('car_id', 'N/A')[-20:]
-                amb_id = workflow.get('data', {}).get('ambulance_id', 'N/A')[-20:]
-                hosp_id = workflow.get('data', {}).get('hospital_id', 'N/A')[-20:]
+                car_id = (workflow.get('data', {}).get('car_id') or 'N/A')[-20:]
+                amb_id = (workflow.get('data', {}).get('ambulance_id') or 'N/A')[-20:]
+                hosp_id = (workflow.get('data', {}).get('hospital_id') or 'N/A')[-20:]
                 print(f"{wf_id_short:<35} {str(car_id):<25} {str(amb_id):<25} {str(hosp_id):<25}")
         else:
             print("No active workflows")
@@ -1758,11 +1758,25 @@ class TCPServer:
             print("\n" + "-" * 120)
             print(f"{'GLOBAL RESOURCES (LEADER VIEW)':^120}")
             print("-" * 120)
+            
+            # Get list of alive server IDs from registry
+            alive_server_ids = {s.server_id for s in self.registry.get_all_servers()}
+            
+            print(f"{'Server ID':<30} {'Status':<15} {'Ambulances':<15} {'Hospitals':<15}")
+            print("-" * 120)
+            
             for server_id, resources in self.global_resources.items():
                 server_short = server_id[-8:]
-                amb_count = len(resources.get("ambulances", {}))
-                hosp_count = len(resources.get("hospitals", {}))
-                print(f"Server {server_short}: {amb_count} ambulances, {hosp_count} hospitals")
+                
+                # Check if server is alive in registry
+                if server_id in alive_server_ids:
+                    status = "ALIVE"
+                    amb_count = len(resources.get("ambulances", {}))
+                    hosp_count = len(resources.get("hospitals", {}))
+                    print(f"{server_short:<30} {status:<15} {str(amb_count):<15} {str(hosp_count):<15}")
+                else:
+                    status = "DEAD"
+                    print(f"{server_short:<30} {status:<15} {'0 (stale)':<15} {'0 (stale)':<15}")
         
         # Print Buffered Events
         print("\n" + "-" * 120)
