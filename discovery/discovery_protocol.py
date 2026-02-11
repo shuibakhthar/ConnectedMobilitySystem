@@ -205,7 +205,7 @@ class BeaconListener(asyncio.DatagramProtocol):
         try:
             msg = json.loads(raw)
             if msg.get("type") == "server_beacon":
-                DISCOVERY_LOGGER.debug(f"Server beacon from {addr}: {msg}")
+                DISCOVERY_LOGGER.info(f"Server beacon from {addr}: server_id={msg.get('server_id')[:8] if msg.get('server_id') else 'None'}, leader={msg.get('leader_id')[:8] if msg.get('leader_id') else 'None'}")
                 self.registry.register_server(msg, addr)
                 if self.on_server_discovered:
                     self.on_server_discovered(msg, addr)
